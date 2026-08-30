@@ -324,8 +324,34 @@ if [ -f "$SOURCE_DIR/.env" ]; then
 elif [ -f "$SOURCE_DIR/.env.example" ]; then
   info "Using built-in defaults. Optional: cp .env.example .env, edit, then rerun ./install.sh"
 fi
+# macOS reports free space including "purgeable" bytes (caches, local snapshots,
+# evictable iCloud files) that the system reclaims on demand; df counts none of it.
+# Ask for the same figure System Settings and Finder show, so the installer never
+# contradicts the OS. Requires the Command Line Tools; falls back to df silently.
+macos_purgeable_aware_kb() {
+  [ "$OS" = macOS ] || return 1
+  xcode-select -p >/dev/null 2>&1 || return 1
+  command -v swift >/dev/null 2>&1 || return 1
+  swift - <<'SWIFT' 2>/dev/null
+import Foundation
+let home = URL(fileURLWithPath: NSHomeDirectory())
+if let values = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+   let capacity = values.volumeAvailableCapacityForImportantUsage {
+  print(capacity / 1024)
+}
+SWIFT
+}
+
 step 1 "Checking this computer"
 DISK_KB=$(df -Pk "$HOME" | awk 'NR==2 {print $4}')
+DISK_SOURCE=df
+if PURGEABLE_KB=$(macos_purgeable_aware_kb) &&
+   [ -n "$PURGEABLE_KB" ] &&
+   [ "$PURGEABLE_KB" -gt "$DISK_KB" ] 2>/dev/null; then
+  DF_GB=$((DISK_KB / 1024 / 1024))
+  DISK_KB=$PURGEABLE_KB
+  DISK_SOURCE=macos
+fi
 DISK_GB=$((DISK_KB / 1024 / 1024))
 if heavy_stack_ready; then
   MIN_DISK_GB=$MIN_DISK_GB_READY
@@ -342,9 +368,16 @@ else
   [ "$FORCE" -eq 1 ] || fail "Prerequisite check stopped installation. Add --force only if you accept reduced reliability."
 fi
 if [ "$DISK_GB" -ge "$MIN_DISK_GB" ]; then
-  ok "Free disk space: ${DISK_GB} GB ($DISK_REASON)"
+  if [ "$DISK_SOURCE" = macos ]; then
+    ok "Free disk space: ${DISK_GB} GB ($DISK_REASON; df alone reports ${DF_GB} GB, the rest is purgeable)"
+  else
+    ok "Free disk space: ${DISK_GB} GB ($DISK_REASON)"
+  fi
 else
   info "Free disk: ${DISK_GB} GB; TACU needs at least ${MIN_DISK_GB} GB ($DISK_REASON)"
+  if [ "$OS" = macOS ] && [ "$DISK_SOURCE" = df ]; then
+    info "If Finder or System Settings shows more free space, that extra is purgeable and df cannot see it. Free it with: tmutil thinlocalsnapshots / 10000000000 4"
+  fi
   [ "$FORCE" -eq 1 ] || fail "Prerequisite check stopped installation. Add --force only if you have another storage plan."
 fi
 PYTHON=""

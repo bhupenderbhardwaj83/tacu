@@ -903,4 +903,95 @@ class ModelContextTests(unittest.TestCase):
         self.assertIn("ssh -T git@github.com", text)
 
 
+class ThinkingBudgetTests(unittest.TestCase):
+    """A model that thinks past its budget must never print its scratchpad."""
+
+    class _Stream:
+        def __init__(self, events: list[dict]) -> None:
+            self._lines = [json.dumps(event).encode() for event in events]
+
+        def __enter__(self) -> "ThinkingBudgetTests._Stream":
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def __iter__(self):
+            return iter(self._lines)
+
+    @staticmethod
+    def _thinking(text: str, reason: str) -> list[dict]:
+        return [{"message": {"role": "assistant", "content": "", "thinking": text}},
+                {"done": True, "done_reason": reason}]
+
+    @staticmethod
+    def _answer(text: str) -> list[dict]:
+        return [{"message": {"role": "assistant", "content": text}},
+                {"done": True, "done_reason": "stop"}]
+
+    def _client(self, budget: str = "80") -> "providers.OllamaProvider":
+        with patch.dict(os.environ, {"TACU_NUM_PREDICT": budget}):
+            return providers.OllamaProvider("http://127.0.0.1:11434", "gemma4:12b-mlx")
+
+    def test_truncated_reasoning_is_retried_instead_of_printed(self) -> None:
+        scratchpad = "The user is asking for the current directory. I need to find"
+        responses = [self._Stream(self._thinking(scratchpad, "length")),
+                     self._Stream(self._answer("Run pwd to print the current directory."))]
+        client = self._client(budget="1024")
+        with patch("tacu.providers.urllib.request.urlopen", side_effect=responses) as opened:
+            text = "".join(client.chat([{"role": "user", "content": "hi"}], stream=True))
+        self.assertNotIn("The user is asking", text)
+        self.assertIn("Run pwd", text)
+        self.assertEqual(opened.call_count, 2, "a truncated reply should be retried")
+        second = json.loads(opened.call_args_list[1].args[0].data)
+        self.assertGreater(second["options"]["num_predict"], 1024)
+
+    def test_budget_ladder_is_owned_by_the_harness(self) -> None:
+        client = self._client(budget="1024")
+        self.assertEqual(client.reply_budgets(), [1024, 2048, 4096])
+        self.assertEqual(client.reply_budgets()[-1], 4096, "escalation must stop at the cap")
+
+    def test_every_budget_is_tried_before_giving_up(self) -> None:
+        scratchpad = "Looking at the available tools: - ls - find - grep - github_actions"
+        client = self._client(budget="1024")
+        responses = [self._Stream(self._thinking(scratchpad, "length"))
+                     for _ in client.reply_budgets()]
+        with patch("tacu.providers.urllib.request.urlopen", side_effect=responses) as opened:
+            text = "".join(client.chat([{"role": "user", "content": "hi"}], stream=True))
+        tried = [json.loads(call.args[0].data)["options"]["num_predict"]
+                 for call in opened.call_args_list]
+        self.assertEqual(tried, [1024, 2048, 4096])
+        self.assertNotIn("Looking at the available tools", text)
+        self.assertNotIn("github_actions", text)
+        # The harness owns the budget: never hand the user an env var to set.
+        self.assertNotIn("TACU_NUM_PREDICT", text)
+        self.assertIn("4096", text)
+        self.assertIn("qwen2.5-coder:7b", text)
+
+    def test_repeat_penalty_is_sent_to_guard_against_loops(self) -> None:
+        client = self._client(budget="1024")
+        responses = [self._Stream(self._answer("Fine."))]
+        with patch("tacu.providers.urllib.request.urlopen", side_effect=responses) as opened:
+            "".join(client.chat([{"role": "user", "content": "hi"}], stream=True))
+        options = json.loads(opened.call_args_list[0].args[0].data)["options"]
+        self.assertGreater(options["repeat_penalty"], 1.0)
+
+    def test_completed_reply_still_falls_back_to_thinking(self) -> None:
+        # The Gemma MLX quirk this fallback exists for: finished cleanly, empty content.
+        responses = [self._Stream(self._thinking("Run pwd to see the directory.", "stop"))]
+        client = self._client(budget="1024")
+        with patch("tacu.providers.urllib.request.urlopen", side_effect=responses) as opened:
+            text = "".join(client.chat([{"role": "user", "content": "hi"}], stream=True))
+        self.assertIn("Run pwd", text)
+        self.assertEqual(opened.call_count, 1, "a clean reply must not be retried")
+
+    def test_content_is_preferred_and_never_retried(self) -> None:
+        responses = [self._Stream(self._answer("Your shell is in /Users/me."))]
+        client = self._client(budget="1024")
+        with patch("tacu.providers.urllib.request.urlopen", side_effect=responses) as opened:
+            text = "".join(client.chat([{"role": "user", "content": "hi"}], stream=True))
+        self.assertEqual(text, "Your shell is in /Users/me.")
+        self.assertEqual(opened.call_count, 1)
+
+
 if __name__ == "__main__": unittest.main()
