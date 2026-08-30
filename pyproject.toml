@@ -1,0 +1,39 @@
+[build-system]
+requires = []
+build-backend = "tacu_build_backend"
+backend-path = ["."]
+
+[project]
+name = "tacu"
+version = "0.1.0"
+description = "Terminal Ally & Companion Unit — a local-first AI harness for terminal tools"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Bhupender Bhardwaj"}]
+keywords = ["terminal", "ollama", "ai", "security", "docker", "tui"]
+classifiers = [
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/bhupenderbhardwaj83/tacu"
+Repository = "https://github.com/bhupenderbhardwaj83/tacu"
+Issues = "https://github.com/bhupenderbhardwaj83/tacu/issues"
+Security = "https://github.com/bhupenderbhardwaj83/tacu/security"
+
+[project.scripts]
+ticu = "tacu.cli:main"
+
+[project.entry-points."tacu.middleware"]
+# Third-party packages may register evidence enrichers here.
+
+[project.entry-points."tacu.providers"]
+# Third-party packages may register model-provider factories here.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

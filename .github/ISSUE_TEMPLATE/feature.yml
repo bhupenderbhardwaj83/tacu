@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a focused improvement that fits TACU's local-first design.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the terminal workflow or user outcome, not only the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain expected commands, output, and safety boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: Architecture check
+      options:
+        - label: The proposal can preserve local model inference and local retained data by default.
+          required: true
+        - label: Any required network access is explicit to the user.
+          required: true

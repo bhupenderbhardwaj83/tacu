@@ -1,0 +1,922 @@
+"""Deterministic facts and exact answers for common verbose terminal output."""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+from .host_parsers import (
+    looks_like_network_table, looks_like_ps, parse_network_table, parse_ps,
+    sort_processes, summarize_destination_ports,
+)
+
+
+def _block_text(block: dict[str, Any]) -> str:
+    kind = block.get("type")
+    if kind == "text": return str(block.get("text", ""))
+    if kind == "json": return json.dumps(block.get("data"), ensure_ascii=False)
+    if kind == "jsonl": return "\n".join(json.dumps(row, ensure_ascii=False) for row in block.get("rows", []))
+    return json.dumps(block, ensure_ascii=False)
+
+
+def _ipv4_network(address: str, mask: str) -> str | None:
+    """Normalize hexadecimal, dotted, or prefix-length masks to CIDR."""
+
+    try:
+        normalized = str(ipaddress.IPv4Address(int(mask, 16))) if mask.casefold().startswith("0x") else mask
+        return str(ipaddress.IPv4Network(f"{address}/{normalized}", strict=False))
+    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError):
+        return None
+
+
+def _interfaces(text: str) -> list[dict[str, Any]]:
+    """Parse macOS/Linux ifconfig and Windows ipconfig into compact interface facts."""
+
+    interfaces: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    # macOS/BSD/Linux ifconfig.
+    for line in text.splitlines():
+        header = re.match(r"^([A-Za-z0-9_.:-]+):\s+(?:flags=|error fetching|<)", line)
+        linux_header = re.match(r"^\d+:\s+([^:@]+)(?:@[^:]+)?:\s+<([^>]*)>", line)
+        if linux_header:
+            if current: interfaces.append(current)
+            state = re.search(r"\bstate\s+(\w+)", line)
+            current = {"name": linux_header.group(1), "ipv4": [], "ipv4_networks": [], "ipv6": [],
+                       "status": "active" if state and state.group(1).upper() == "UP" else "unknown",
+                       "flags": linux_header.group(2).split(",")}
+            continue
+        if header:
+            if current: interfaces.append(current)
+            current = {"name": header.group(1), "ipv4": [], "ipv4_networks": [], "ipv6": [], "status": "unknown",
+                       "flags": re.search(r"<([^>]*)>", line).group(1).split(",") if re.search(r"<([^>]*)>", line) else []}
+            continue
+        if current is None: continue
+        value = line.strip()
+        ip4 = re.match(r"inet (\d+(?:\.\d+){3})(?:/(\d{1,2}))?\b", value)
+        ip6 = re.match(r"inet6 ([0-9a-fA-F:]+)(?:%[^ ]+)?\b", value)
+        if ip4:
+            try:
+                address = ipaddress.IPv4Address(ip4.group(1))
+                if not address.is_loopback:
+                    current["ipv4"].append(str(address))
+                    mask_match = re.search(r"\bnetmask\s+(\S+)", value)
+                    mask = ip4.group(2) or (mask_match.group(1) if mask_match else "")
+                    network = _ipv4_network(str(address), mask) if mask else None
+                    if network and network not in current["ipv4_networks"]:
+                        current["ipv4_networks"].append(network)
+            except ipaddress.AddressValueError: pass
+        elif ip6 and ip6.group(1) != "::1": current["ipv6"].append(ip6.group(1))
+        elif value.startswith("ether "): current["mac"] = value.split()[1]
+        elif value.startswith("status: "): current["status"] = value.split(":", 1)[1].strip()
+        elif value.startswith("media: "): current["media"] = value.split(":", 1)[1].strip()
+    if current: interfaces.append(current)
+    if interfaces: return interfaces
+
+    # Windows ipconfig.
+    current = None
+    for line in text.splitlines():
+        adapter = re.match(r"^([^:]+ adapter [^:]+):\s*$", line.strip(), re.I)
+        if adapter:
+            if current: interfaces.append(current)
+            current = {"name": adapter.group(1), "ipv4": [], "ipv4_networks": [], "ipv6": [], "status": "unknown", "flags": []}
+            continue
+        if current is None: continue
+        if "Media disconnected" in line: current["status"] = "inactive"
+        match = re.search(r"IPv4 Address[^:]*:\s*(\d+(?:\.\d+){3})", line, re.I)
+        if match:
+            current["ipv4"].append(match.group(1)); current["status"] = "active"
+        mask = re.search(r"Subnet Mask[^:]*:\s*(\d+(?:\.\d+){3})", line, re.I)
+        if mask and current["ipv4"]:
+            network = _ipv4_network(current["ipv4"][-1], mask.group(1))
+            if network and network not in current["ipv4_networks"]:
+                current["ipv4_networks"].append(network)
+        match = re.search(r"Physical Address[^:]*:\s*([A-F0-9-]{17})", line, re.I)
+        if match: current["mac"] = match.group(1)
+    if current: interfaces.append(current)
+    return interfaces
+
+
+def _json_interfaces(value: Any) -> list[dict[str, Any]]:
+    """Parse `ip -json address` without depending on platform-specific Python bindings."""
+
+    if not isinstance(value, list) or not value or not isinstance(value[0], dict) or "ifname" not in value[0]:
+        return []
+    interfaces: list[dict[str, Any]] = []
+    for item in value:
+        addresses = item.get("addr_info") or []
+        ipv4 = [address.get("local") for address in addresses
+                if address.get("family") == "inet" and address.get("local") and not str(address["local"]).startswith("127.")]
+        ipv6 = [address.get("local") for address in addresses if address.get("family") == "inet6" and address.get("local")]
+        networks = [network for address in addresses
+                    if address.get("family") == "inet" and address.get("local") and address.get("prefixlen") is not None
+                    for network in [_ipv4_network(str(address["local"]), str(address["prefixlen"]))] if network]
+        interfaces.append({"name": item.get("ifname", "unknown"), "ipv4": ipv4,
+                           "ipv4_networks": networks, "ipv6": ipv6,
+                           "status": "active" if item.get("operstate") == "UP" else "unknown",
+                           "flags": item.get("flags") or [], "mac": item.get("address")})
+    return interfaces
+
+
+def _primary_interface(interfaces: list[dict[str, Any]]) -> dict[str, Any] | None:
+    viable = [item for item in interfaces if item.get("ipv4")]
+    if not viable: return None
+    def score(item: dict[str, Any]) -> int:
+        name = item["name"].lower(); points = 0
+        if item.get("status") == "active": points += 100
+        if {"UP", "RUNNING"}.issubset(set(item.get("flags", []))): points += 50
+        if name in {"en0", "eth0", "wlan0", "wi-fi", "ethernet"}: points += 40
+        if any(ipaddress.IPv4Address(value).is_private for value in item["ipv4"]): points += 20
+        if name.startswith(("lo", "utun", "awdl", "llw", "bridge", "docker", "veth")): points -= 100
+        return points
+    return max(viable, key=score)
+
+
+def _json_values(text: str) -> list[Any]:
+    decoder = json.JSONDecoder(); values: list[Any] = []
+    for match in re.finditer(r"(?m)^[ \t]*([\[{])", text):
+        try:
+            value, _ = decoder.raw_decode(text, match.start(1))
+        except json.JSONDecodeError:
+            continue
+        values.append(value)
+    return values
+
+
+def _docker_summary(value: Any) -> dict[str, Any] | None:
+    records = value if isinstance(value, list) else [value]
+    if not records or not isinstance(records[0], dict): return None
+    item = records[0]
+    if not any(key in item for key in ("Config", "NetworkSettings", "HostConfig")): return None
+    config = item.get("Config") or {}; state = item.get("State") or {}; host = item.get("HostConfig") or {}
+    networks = (item.get("NetworkSettings") or {}).get("Networks") or {}
+    ports: list[str] = []
+    for container_port, bindings in ((item.get("NetworkSettings") or {}).get("Ports") or {}).items():
+        for binding in bindings or []:
+            ports.append(f"{binding.get('HostIp') or '0.0.0.0'}:{binding.get('HostPort')} → {container_port}")
+    network_facts = [{"name": name, "ip": details.get("IPAddress"), "gateway": details.get("Gateway")}
+                     for name, details in networks.items()]
+    descriptor = item.get("ImageManifestDescriptor") or {}; platform = descriptor.get("platform") or {}
+    labels = config.get("Labels") or {}
+    return {
+        "kind": "docker_container", "name": str(item.get("Name", "")).lstrip("/"), "id": item.get("Id"),
+        "image": config.get("Image") or item.get("Image"), "image_digest": item.get("Image"),
+        "image_title": labels.get("org.opencontainers.image.title"),
+        "image_version": labels.get("org.opencontainers.image.version"),
+        "status": state.get("Status"), "running": state.get("Running"), "platform": item.get("Platform"),
+        "architecture": platform.get("architecture"), "ports": ports, "networks": network_facts,
+        "restart_policy": (host.get("RestartPolicy") or {}).get("Name"), "privileged": host.get("Privileged"),
+        "mounts": [{"type": mount.get("Type"), "source": mount.get("Source"),
+                    "destination": mount.get("Destination"), "writable": mount.get("RW")}
+                   for mount in item.get("Mounts") or []],
+    }
+
+
+def _dns_summary(text: str, command: str = "") -> dict[str, Any] | None:
+    """Extract common nslookup, dig, and host answers without a model call."""
+
+    lowered = (command + "\n" + text).casefold()
+    named_tool = any(tool in lowered for tool in ("nslookup", " dig ", "\ndig ", "host "))
+    output_signature = bool(re.search(
+        r"(?mi)(^Server:\s*\S+|mail exchanger\s*=|\sIN\s+(?:MX|TXT|A|AAAA)\s+|"
+        r"^\S+\s+text\s*=|^Name:\s*\S+)",
+        text,
+    ))
+    if not named_tool and not output_signature:
+        return None
+    type_match = re.search(r"(?:-type=|-query=|\btype=)(A|AAAA|MX|TXT|CNAME|NS)\b", command, re.I)
+    query_type = type_match.group(1).upper() if type_match else None
+    resolver_match = re.search(r"(?mi)^Server:\s*(\S+)", text)
+    resolver = resolver_match.group(1) if resolver_match else None
+    answers: list[dict[str, Any]] = []
+
+    mx_patterns = (
+        r"(?mi)^(\S+)\s+mail exchanger\s*=\s*(\d+)\s+(\S+)\.?\s*$",
+        r"(?mi)^(\S+)\.?\s+\d+\s+IN\s+MX\s+(\d+)\s+(\S+)\.?\s*$",
+    )
+    for pattern in mx_patterns:
+        for domain, priority, host in re.findall(pattern, text):
+            answer = {"type": "MX", "domain": domain.rstrip("."), "priority": int(priority),
+                      "value": host.rstrip(".")}
+            if answer not in answers:
+                answers.append(answer)
+    if answers:
+        query_type = "MX"
+
+    txt_patterns = (
+        r'(?mi)^(\S+)\s+text\s*=\s*"([^"]*)"',
+        r'(?mi)^(\S+)\.?\s+\d+\s+IN\s+TXT\s+"([^"]*)"',
+    )
+    for pattern in txt_patterns:
+        for domain, value in re.findall(pattern, text):
+            answer = {"type": "TXT", "domain": domain.rstrip("."), "value": value}
+            if answer not in answers:
+                answers.append(answer)
+    if any(answer["type"] == "TXT" for answer in answers):
+        query_type = query_type or "TXT"
+
+    for name, address in re.findall(
+        r"(?mi)^Name:\s*(\S+)\s*$\s*^Address(?:es)?:\s*([^\s#]+)", text
+    ):
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        answer_type = "AAAA" if parsed.version == 6 else "A"
+        answers.append({"type": answer_type, "domain": name.rstrip("."), "value": str(parsed)})
+        query_type = query_type or answer_type
+
+    if not answers:
+        return None
+    return {
+        "kind": "dns_lookup",
+        "source": command or "captured DNS output",
+        "query_type": query_type or "DNS",
+        "resolver": resolver,
+        "answers": answers,
+        "method": "deterministic-dns-parser",
+    }
+
+
+def extract_facts(text: str, command: str = "", structured: Any = None) -> dict[str, Any] | None:
+    dns = _dns_summary(text, command)
+    if dns:
+        return dns
+    interfaces = _json_interfaces(structured) if structured is not None else []
+    interfaces = interfaces or _interfaces(text)
+    if interfaces:
+        primary = _primary_interface(interfaces)
+        return {"kind": "network_interfaces", "source": command or "captured output", "primary": primary,
+                "interfaces": interfaces, "interface_count": len(interfaces),
+                "method": "deterministic-ifconfig-parser"}
+    candidates = ([structured] if structured is not None else []) + _json_values(text)
+    for candidate in candidates:
+        summary = _docker_summary(candidate)
+        if summary:
+            summary["method"] = "deterministic-docker-inspect-parser"
+            return summary
+    if looks_like_ps(text, command) or (isinstance(structured, dict) and structured.get("processes")):
+        processes = (structured.get("processes") if isinstance(structured, dict) else None) or parse_ps(text)
+        if processes:
+            return {"kind": "processes", "source": command or "captured output",
+                    "processes": processes[:20], "count": len(processes),
+                    "top_cpu": (sort_processes(processes, key="cpu", limit=1) or [None])[0],
+                    "top_memory": (sort_processes(processes, key="memory", limit=1) or [None])[0],
+                    "method": "deterministic-ps-parser"}
+    if looks_like_network_table(text, command) or (isinstance(structured, dict)
+                                                   and (structured.get("connections") or structured.get("destination_ports"))):
+        if isinstance(structured, dict) and (structured.get("connections") or structured.get("destination_ports")):
+            connections = structured.get("connections") or []
+            ports = structured.get("destination_ports") or summarize_destination_ports(connections)
+        else:
+            connections = parse_network_table(text, command)
+            ports = summarize_destination_ports(connections)
+        if connections or ports:
+            return {"kind": "network_connections", "source": command or "captured output",
+                    "connections": connections[:40], "connection_count": len(connections),
+                    "destination_ports": ports, "top_destination_port": ports[0] if ports else None,
+                    "method": "deterministic-network-parser"}
+    return None
+
+
+def exact_answer(question: str, evidence: dict[str, Any] | None) -> str | None:
+    """Return a concise answer only when intent and deterministic facts both match."""
+
+    if not evidence: return None
+    facts = evidence.get("facts")
+    if not facts:
+        block = evidence.get("result", {}).get("stdout", {})
+        structured = block.get("data") if block.get("type") == "json" else None
+        facts = extract_facts(_block_text(block), evidence.get("invocation", {}).get("command", ""), structured)
+    if not facts: return None
+    query = question.casefold()
+    generic = ("exact" in query and "information" in query) or "concise facts" in query
+    if facts["kind"] == "network_interfaces" and (generic or any(word in query for word in ("ip", "address", "interface", "network", "subnet"))):
+        primary = facts.get("primary")
+        if not primary or not primary.get("ipv4"): return None
+        ip = primary["ipv4"][0]
+        networks = primary.get("ipv4_networks") or []
+        if ("subnet" in query or "network" in query) and networks:
+            if "just" in query or "only" in query:
+                return networks[0]
+            return f"Primary interface: {primary['name']}\nIPv4 address: {ip}\nSubnet: {networks[0]}"
+        if "just" in query or "only" in query:
+            return ip
+        return f"Primary interface: {primary['name']}\nIPv4 address: {ip}"
+    if facts["kind"] == "dns_lookup":
+        answers = facts.get("answers") or []
+        if not answers:
+            return None
+        lines = [f"DNS record type: {facts.get('query_type') or 'unknown'}"]
+        if facts.get("resolver"):
+            lines.append(f"Resolver: {facts['resolver']}")
+        mx = [answer for answer in answers if answer.get("type") == "MX"]
+        txt = [answer for answer in answers if answer.get("type") == "TXT"]
+        addresses = [answer for answer in answers if answer.get("type") in {"A", "AAAA"}]
+        if mx:
+            lines.append("Mail exchangers:")
+            lines.extend(f"- {answer['value']} (priority {answer['priority']})" for answer in mx)
+            lines.append("Lower priority numbers are preferred first.")
+        if txt:
+            lines.append("TXT records:")
+            lines.extend(f"- {answer['value']}" for answer in txt)
+        if addresses:
+            lines.append("Addresses:")
+            lines.extend(f"- {answer['domain']}: {answer['value']}" for answer in addresses)
+        return "\n".join(lines)
+    if facts["kind"] == "docker_container":
+        broad_details = any(phrase in query for phrase in
+                            ("basic details", "container details", "all details", "full details", "summary", "overview"))
+        if "image" in query and not broad_details:
+            return f"Docker image: {facts.get('image') or 'unknown'}"
+        if generic or any(word in query for word in ("image", "docker", "container", "port", "status", "basic", "detail", "summary")):
+            lines = [f"Container: {facts.get('name') or 'unknown'}", f"Image: {facts.get('image') or 'unknown'}",
+                     f"Status: {facts.get('status') or 'unknown'}"]
+            if facts.get("image_title"): lines.append(f"Image title: {facts['image_title']}")
+            if facts.get("image_version"): lines.append(f"Image version: {facts['image_version']}")
+            platform = "/".join(value for value in (facts.get("platform"), facts.get("architecture")) if value)
+            if platform: lines.append(f"Platform: {platform}")
+            if facts.get("ports"): lines.append("Ports: " + ", ".join(facts["ports"]))
+            return "\n".join(lines)
+    if facts["kind"] == "processes" and (generic or any(word in query for word in ("cpu", "ram", "memory", "process", "pid"))):
+        return _process_answer(query, facts)
+    if facts["kind"] == "network_connections" and (generic or any(word in query for word in (
+            "port", "tcp", "udp", "connection", "destination", "outbound", "listen", "network"))):
+        return _connection_answer(query, facts)
+    from .ingest_filter import exact_filter_answer
+    return exact_filter_answer(question, evidence)
+
+
+def _process_label(item: dict[str, Any] | None) -> str:
+    if not item:
+        return "unknown"
+    command = str(item.get("command") or item.get("executable") or "unknown").strip()
+    token = command.split()[0] if command else "unknown"
+    name = Path(token).name or token
+    return f"{name} (PID {item.get('pid')})"
+
+
+def _process_answer(query: str, facts: dict[str, Any]) -> str | None:
+    processes = facts.get("processes") or []
+    if not processes:
+        return "No processes were returned by the native process recipe."
+    want_mem = any(word in query for word in ("ram", "memory", "rss"))
+    want_cpu = "cpu" in query or not want_mem
+    explicit = re.search(r"\b(?:top|first|highest)\s+(\d{1,3})\b", query)
+    limit = int(explicit.group(1)) if explicit else 1
+    limit = max(1, min(limit, 20))
+    lines: list[str] = []
+
+    def format_cpu(item: dict[str, Any]) -> str:
+        cpu = item.get("cpu_percent")
+        cpu_text = f"{cpu:.1f}%" if isinstance(cpu, (int, float)) else "unknown CPU"
+        return f"{_process_label(item)} at {cpu_text}"
+
+    def format_mem(item: dict[str, Any]) -> str:
+        mem = item.get("memory_percent")
+        rss = item.get("rss_bytes")
+        extra = []
+        if isinstance(mem, (int, float)):
+            extra.append(f"{mem:.1f}% memory")
+        if isinstance(rss, int):
+            extra.append(f"{rss / (1024 ** 2):.0f} MB RSS")
+        detail = " at " + ", ".join(extra) if extra else ""
+        return f"{_process_label(item)}{detail}"
+
+    if want_cpu:
+        ranked = sort_processes(processes, key="cpu", limit=limit)
+        if limit == 1 and ranked:
+            lines.append(f"Highest CPU: {format_cpu(ranked[0])}.")
+        elif ranked:
+            lines.append(f"Top {len(ranked)} processes by CPU:")
+            lines.extend(f"{index}. {format_cpu(item)}" for index, item in enumerate(ranked, 1))
+    if want_mem:
+        ranked = sort_processes(processes, key="memory", limit=limit)
+        if limit == 1 and ranked:
+            lines.append(f"Highest RAM: {format_mem(ranked[0])}.")
+        elif ranked:
+            lines.append(f"Top {len(ranked)} processes by RAM:")
+            lines.extend(f"{index}. {format_mem(item)}" for index, item in enumerate(ranked, 1))
+    return "\n".join(lines) if lines else None
+
+
+def _connection_answer(query: str, facts: dict[str, Any]) -> str | None:
+    ports = facts.get("destination_ports") or []
+    connections = facts.get("connections") or []
+    state = (facts.get("state") or "").upper()
+    if state == "NOT_ESTABLISHED" or re.search(
+            r"\b(?:not|other than|except)\b.{0,24}\bestablished\b|\bother(?:\s+\w+){0,3}\s+than\b.{0,20}\bestablished\b",
+            query):
+        if not connections:
+            return "No TCP connections in a state other than ESTABLISHED were found."
+        lines = [f"{len(connections)} TCP connection"
+                 + ("s" if len(connections) != 1 else "")
+                 + " in a state other than ESTABLISHED."]
+        for item in connections[:12]:
+            remote = item.get("remote_host")
+            port = item.get("remote_port") or item.get("local_port")
+            label = f"{remote}:{port}" if remote else str(port or "")
+            lines.append(f"- {item.get('state') or 'UNKNOWN'} {label} ({item.get('command') or 'unknown'})")
+        return "\n".join(lines)
+    if "listen" in query:
+        listening = [item for item in connections if (item.get("state") or "").upper() == "LISTEN"]
+        if not listening:
+            return "No listening TCP sockets were found."
+        lines = [f"Found {len(listening)} listening TCP sockets."]
+        for item in listening[:8]:
+            owner = item.get("command") or "unknown"
+            lines.append(f"- {owner} (PID {item.get('pid')}) on {item.get('local_host')}:{item.get('local_port')}")
+        return "\n".join(lines)
+    if ports and any(word in query for word in ("destination", "outbound", "port", "tcp", "top", "connection")):
+        port_match = re.search(r"\b(\d{2,5})\b", query)
+        wanted = int(port_match.group(1)) if port_match else None
+        adjective = "established " if state in {"", "ESTABLISHED"} else f"{state.lower()} "
+        if wanted and 1 <= wanted <= 65535:
+            matching = [item for item in connections
+                        if item.get("remote_port") == wanted or item.get("local_port") == wanted]
+            hosts: list[str] = []
+            for item in matching:
+                host = item.get("remote_host")
+                if host and host not in hosts:
+                    hosts.append(str(host))
+            lines = [f"{len(matching)} {adjective}TCP {wanted} destination"
+                     + ("s" if len(matching) != 1 else "") + "."]
+            if hosts:
+                lines.append("Remote hosts: " + ", ".join(hosts[:8]))
+            elif not matching:
+                lines = [f"No {adjective}TCP {wanted} connections were found."]
+            return "\n".join(lines)
+        top = facts.get("top_destination_port") or ports[0]
+        lines = [f"Top outbound destination port: {top['port']} ({top['count']} {adjective}connections)."]
+        if top.get("hosts"):
+            lines.append("Sample remote hosts: " + ", ".join(str(host) for host in top["hosts"][:5]))
+        if len(ports) > 1:
+            lines.append("Other destination ports:")
+            lines.extend(f"- {item['port']}: {item['count']} connections" for item in ports[1:6])
+        return "\n".join(lines)
+    if not connections:
+        return "No TCP connections were found."
+    return f"{facts.get('connection_count') or len(connections)} TCP connections observed."
+
+
+def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | None:
+    """Answer a host-ops intent from native tool results without a model call."""
+
+    if not results:
+        return None
+    query = question.casefold()
+    process_data: list[dict[str, Any]] = []
+    network_data: list[dict[str, Any]] = []
+    app_data: list[dict[str, Any]] = []
+    ollama_data: list[dict[str, Any]] = []
+    system_data: list[dict[str, Any]] = []
+    docker_data: list[dict[str, Any]] = []
+    git_data: list[dict[str, Any]] = []
+    file_data: list[dict[str, Any]] = []
+    service_data: list[dict[str, Any]] = []
+    package_data: list[dict[str, Any]] = []
+    security_data: list[dict[str, Any]] = []
+    extra_net: list[dict[str, Any]] = []
+    for item in results:
+        result = item.get("result") or {}
+        data = result.get("data") or {}
+        tool = result.get("tool")
+        if data.get("processes") is not None or data.get("open_files") is not None:
+            process_data.append(data)
+        if (data.get("destination_ports") is not None or data.get("connections") is not None
+                or data.get("listening") is not None or data.get("owners") is not None
+                or data.get("primary") is not None or data.get("interfaces") is not None
+                or data.get("public_ip") is not None):
+            network_data.append(data)
+        if (data.get("routes") is not None or data.get("dns") is not None or data.get("arp") is not None
+                or data.get("records") is not None or data.get("operation") == "resolve"):
+            extra_net.append(data)
+        if data.get("applications") is not None or data.get("version"):
+            app_data.append(data)
+        docker_mutate = data.get("operation") in {"stop", "rm", "pull"} and (
+            "docker" in query or "container" in query or "image" in query
+        )
+        ollama_mutate = data.get("operation") in {"pull", "rm", "stop"} and (
+            "ollama" in query or ("model" in query and "container" not in query)
+        )
+        if tool == "ollama" or (tool is None and (
+                data.get("models") is not None or data.get("info") is not None
+                or data.get("operation") in {"model_info", "running_models", "installed_models"}
+                or ollama_mutate)):
+            ollama_data.append(data)
+        if data.get("system") is not None:
+            system_data.append(data)
+        if tool == "docker" or (tool is None and (
+                data.get("containers") is not None or data.get("images") is not None
+                or data.get("logs") is not None or data.get("stats") is not None
+                or data.get("networks") is not None or data.get("volumes") is not None
+                or data.get("operation") in {"start", "rmi", "ps", "inspect"}
+                or docker_mutate)):
+            docker_data.append(data)
+        if (data.get("is_repo") is not None or data.get("repositories") is not None
+                or data.get("commits") is not None or data.get("diff") is not None
+                or data.get("branches") is not None or data.get("remotes") is not None
+                or data.get("changes") is not None
+                or data.get("operation") in {"add", "commit", "push", "status", "log", "diff", "branch", "remote"}):
+            git_data.append(data)
+        if (data.get("matches") is not None or data.get("metadata") is not None
+                or data.get("bytes_written") is not None or data.get("url")
+                or data.get("deleted") is not None):
+            file_data.append(data)
+        if data.get("services") is not None:
+            service_data.append(data)
+        if data.get("packages") is not None:
+            package_data.append(data)
+        if data.get("signature") is not None or data.get("gatekeeper") is not None or data.get("quarantined") is not None or data.get("sha256") is not None:
+            security_data.append(data)
+    lines: list[str] = []
+    hostname = next(((data.get("system") or {}).get("hostname") for data in system_data
+                     if (data.get("system") or {}).get("hostname")), None)
+    from .routing import intent_wants_dns_lookup
+    wants_name = any(phrase in query for phrase in
+                     ("hostname", "system name", "computer name", "machine name", "host name"))
+    if wants_name and hostname and not intent_wants_dns_lookup(query):
+        lines.append(f"System name: {hostname}")
+    if process_data:
+        skip_process = any(word in query for word in ("ollama", "docker", "container"))
+        opened = next((data for data in process_data if data.get("open_files") is not None), None)
+        tree = next((data for data in process_data if data.get("operation") == "tree"), None)
+        if skip_process and not opened and not tree:
+            pass
+        elif opened:
+            rows = opened.get("open_files") or []
+            lines.append(f"PID {opened.get('pid')} has {len(rows)} open file(s).")
+            lines.extend(f"- {row}" for row in rows[:12])
+        elif tree:
+            nodes = tree.get("processes") or []
+            lines.append(f"Process tree ({len(nodes)} node(s)):")
+            lines.extend(
+                f"{'  ' * int(item.get('depth') or 0)}- PID {item.get('pid')}: {item.get('command')}"
+                for item in nodes[:20]
+            )
+        else:
+            combined: list[dict[str, Any]] = []
+            for data in process_data:
+                combined.extend(data.get("processes") or [])
+            facts = {"kind": "processes", "processes": combined,
+                     "top_cpu": next((data.get("top") for data in process_data
+                                      if data.get("operation") == "top_cpu" and data.get("top")), None),
+                     "top_memory": next((data.get("top") for data in process_data
+                                         if data.get("operation") == "top_memory" and data.get("top")), None)}
+            if not facts["top_cpu"]:
+                facts["top_cpu"] = (sort_processes(combined, key="cpu", limit=1) or [None])[0]
+            if not facts["top_memory"]:
+                facts["top_memory"] = (sort_processes(combined, key="memory", limit=1) or [None])[0]
+            answer = _process_answer(query, facts)
+            if answer:
+                lines.append(answer)
+    if network_data:
+        data = network_data[0]
+        public = next((item.get("public_ip") for item in network_data if item.get("public_ip")), None)
+        if public and any(phrase in query for phrase in ("public", "external", "wan", "internet")):
+            lines.append(f"Public IP: {public}")
+        elif data.get("owners"):
+            owner = data["owners"][0]
+            lines.append(
+                f"{owner.get('command') or 'unknown'} (PID {owner.get('pid')}) owns TCP port {data.get('port')}."
+            )
+        elif data.get("listening") is not None and "listen" in query:
+            answer = _connection_answer(query, {"kind": "network_connections",
+                                                "connections": data.get("listening") or [],
+                                                "destination_ports": []})
+            if answer:
+                lines.append(answer)
+        elif data.get("primary") is not None or data.get("interfaces"):
+            if any(word in query for word in ("ip", "interface", "address", "hostname", "system name")):
+                primary = data.get("primary") or {}
+                ip = (primary.get("ipv4") or ["unknown"])[0]
+                lines.append(f"Primary interface: {primary.get('name')}\nIPv4 address: {ip}")
+        elif data.get("connections") is not None or data.get("destination_ports"):
+            answer = _connection_answer(query, {
+                "kind": "network_connections",
+                "state": data.get("state"),
+                "connections": data.get("connections") or [],
+                "connection_count": data.get("connection_count") or len(data.get("connections") or []),
+                "destination_ports": data.get("destination_ports") or [],
+                "top_destination_port": data.get("top_destination_port"),
+            })
+            if answer:
+                lines.append(answer)
+    if app_data:
+        named = [data for data in app_data if data.get("query")]
+        listed = [data for data in app_data if not data.get("query")]
+        for data in named:
+            apps = data.get("applications") or []
+            query_name = data.get("query")
+            install_ask = any(phrase in query for phrase in ("installed", "install date", "when was", "creation date"))
+            if install_ask:
+                if not apps:
+                    lines.append(f"No installed application matching `{query_name}` was found.")
+                    continue
+                for item in apps[:5]:
+                    label = item.get("display_name") or item.get("name") or query_name
+                    created = item.get("fs_creation_date") or item.get("content_created")
+                    added = item.get("date_added")
+                    if created or added:
+                        if created:
+                            lines.append(f"{label} filesystem creation date: {created}.")
+                        if added and added != created:
+                            lines.append(f"Spotlight date added: {added}.")
+                        if item.get("path"):
+                            lines.append(f"Path: `{item['path']}`")
+                    else:
+                        lines.append(f"No install/creation date was available for {label}.")
+                continue
+            if apps:
+                lines.append(f"Found {len(apps)} application(s) matching `{query_name}`:")
+                lines.extend(f"- {item.get('display_name') or item.get('name')} ({item.get('path')})"
+                             for item in apps[:12])
+            else:
+                lines.append(f"No installed application matching `{query_name}` was found.")
+            if data.get("version") and query_name:
+                lines.append(f"Version: {data['version']}")
+            if data.get("running"):
+                lines.append(f"Running: {_process_label(data['running'][0])}")
+        for data in listed:
+            apps = data.get("applications") or []
+            if apps:
+                lines.append(f"{len(apps)} applications in /Applications:")
+                lines.extend(f"- {item.get('display_name') or item.get('name')}" for item in apps[:20])
+            if data.get("running") and not named:
+                lines.append(f"Running: {_process_label(data['running'][0])}")
+    if docker_data:
+        data = next((item for item in docker_data if item.get("operation") == "inspect"), None) or docker_data[0]
+        if data.get("logs"):
+            lines.append(f"Recent logs for `{data.get('name')}`:")
+            lines.extend(str(row) for row in data["logs"][-20:])
+        elif data.get("stats"):
+            stats = data["stats"]
+            lines.append(f"Docker stats `{stats.get('name')}`: CPU {stats.get('cpu')}, memory {stats.get('memory')}")
+        elif data.get("operation") in {"start", "stop", "rm", "rmi", "pull"}:
+            label = data.get("name") or "target"
+            verb = {"start": "Started", "stop": "Stopped", "rm": "Removed container",
+                    "rmi": "Removed image", "pull": "Pulled"}[data["operation"]]
+            if data.get("exit_code") not in (None, 0):
+                lines.append(f"{verb} `{label}` failed: {(data.get('stderr') or 'error')[:300]}")
+            else:
+                lines.append(f"{verb} `{label}`.")
+        elif data.get("networks") and not data.get("containers"):
+            networks = data.get("networks") or []
+            if not networks:
+                lines.append("No Docker networks were listed.")
+            else:
+                lines.append(f"{len(networks)} Docker network(s):")
+                lines.extend(f"- {item.get('name')} ({item.get('driver')})" for item in networks[:20])
+        elif data.get("volumes") is not None:
+            volumes = data.get("volumes") or []
+            if not volumes:
+                lines.append("No Docker volumes were listed.")
+            else:
+                lines.append(f"{len(volumes)} Docker volume(s):")
+                lines.extend(f"- {item.get('name')}" for item in volumes[:20])
+        else:
+            containers = data.get("containers") or []
+            images = data.get("images") or []
+            if data.get("operation") == "images" or images and not containers:
+                if not images:
+                    lines.append("No Docker images were listed.")
+                else:
+                    lines.append(f"{len(images)} Docker image(s):")
+                    lines.extend(f"- {item.get('image')} ({item.get('size')})" for item in images[:12])
+            else:
+                if not containers:
+                    lines.append("No running Docker containers were found.")
+                else:
+                    lines.append(f"{len(containers)} Docker container(s):")
+                    for item in containers[:20]:
+                        network = item.get("network") or ""
+                        extra = f" · {network.strip()}" if network else ""
+                        lines.append(
+                            f"- {item.get('name')} image={item.get('image')} "
+                            f"{item.get('status') or ''}{extra}".rstrip()
+                        )
+    if git_data:
+        data = git_data[0]
+        if data.get("operation") in {"add", "commit", "push"}:
+            verb = {"add": "Staged", "commit": "Committed", "push": "Pushed"}[data["operation"]]
+            target = data.get("name") or data.get("message") or data.get("root")
+            if data.get("exit_code") not in (None, 0):
+                lines.append(f"{verb} failed: {(data.get('stderr') or 'error')[:300]}")
+            else:
+                lines.append(f"{verb} `{target}`.")
+        elif data.get("commits") is not None:
+            commits = data.get("commits") or []
+            lines.append(f"{len(commits)} recent commit(s) in `{data.get('root')}`:")
+            lines.extend(f"- {row}" for row in commits[:20])
+        elif data.get("diff") is not None:
+            lines.append(f"Git diff in `{data.get('root')}`:")
+            lines.append(str(data.get("diff") or ""))
+        elif data.get("branches") is not None:
+            lines.append(f"Git branches in `{data.get('root')}`:")
+            lines.extend(f"- {row}" for row in (data.get("branches") or [])[:20])
+        elif data.get("remotes") is not None:
+            remotes = data.get("remotes") or []
+            if not remotes:
+                lines.append(f"No Git remotes in `{data.get('root')}`.")
+            else:
+                lines.append(f"Git remotes in `{data.get('root')}`:")
+                lines.extend(f"- {row}" for row in remotes[:12])
+        elif data.get("changes") is not None or data.get("branch"):
+            branch = data.get("branch") or "unknown"
+            changes = data.get("changes") or []
+            lines.append(f"`{data.get('root')}` · {branch}")
+            if not changes:
+                lines.append("Working tree clean.")
+            else:
+                lines.append(f"{len(changes)} changed path(s):")
+                lines.extend(f"- {row}" for row in changes[:20])
+        elif data.get("repositories") is not None:
+            repos = data.get("repositories") or []
+            if not repos:
+                lines.append(f"No Git repositories were found under `{data.get('root')}`.")
+            else:
+                lines.append(f"Found {len(repos)} Git repositor" + ("y:" if len(repos) == 1 else "ies:"))
+                lines.extend(f"- `{path}`" for path in repos[:20])
+        elif "is_repo" in data:
+            root = data.get("root") or "this directory"
+            lines.append(f"`{root}` is a Git repository." if data.get("is_repo")
+                         else f"`{root}` is not a Git repository.")
+    if file_data:
+        wrote = False
+        for data in file_data:
+            if data.get("deleted") is True:
+                lines.append(f"Removed `{data.get('path')}`.")
+                wrote = True
+            elif data.get("deleted") is False:
+                lines.append(f"`{data.get('path') or data.get('name')}` was not found.")
+                wrote = True
+            if data.get("bytes_written") is not None:
+                lines.append(f"Created `{data.get('path')}` ({data.get('bytes_written')} bytes).")
+                wrote = True
+            if data.get("url"):
+                lines.append(f"Local server: {data.get('url')} (PID {data.get('pid')}).")
+                if data.get("opened"):
+                    lines.append(f"Opened in {data.get('browser') or 'the browser'}.")
+                if data.get("pid"):
+                    lines.append(f"Stop it with: kill {data.get('pid')}")
+                wrote = True
+        if not wrote:
+            data = file_data[0]
+            matches = data.get("matches") or []
+            if data.get("content"):
+                path = data.get("path") or ((matches[0].get("path") if matches else None) or "file")
+                lines.append(f"Contents of `{path}`:")
+                lines.append(str(data["content"]))
+                if data.get("truncated"):
+                    lines.append("(preview truncated)")
+            elif data.get("metadata"):
+                meta = data["metadata"]
+                lines.append(f"`{meta.get('path')}` · {meta.get('bytes')} bytes · mode {meta.get('permissions')}")
+                if meta.get("sha256"):
+                    lines.append(f"SHA-256: {meta['sha256']}")
+                if meta.get("usage"):
+                    lines.extend(str(row) for row in meta["usage"][:12])
+            elif data.get("operation") == "open" and data.get("path"):
+                lines.append(f"Opened `{data['path']}`." if data.get("exit_code") == 0
+                             else f"Could not open `{data['path']}`.")
+            elif not matches:
+                lines.append(f"No files matching `{data.get('query') or 'the request'}` were found.")
+            else:
+                lines.append(f"Found {len(matches)} matching path(s):")
+                lines.extend(f"- `{item.get('path')}`" for item in matches[:15])
+    if ollama_data:
+        data = ollama_data[0]
+        if data.get("operation") in {"pull", "rm", "stop"}:
+            verb = {"pull": "Pulled", "rm": "Removed", "stop": "Stopped"}[data["operation"]]
+            if data.get("exit_code") not in (None, 0):
+                lines.append(f"{verb} `{data.get('name')}` failed: {(data.get('stderr') or 'error')[:300]}")
+            else:
+                lines.append(f"{verb} `{data.get('name')}`.")
+        elif data.get("info"):
+            lines.append(f"Ollama model `{data.get('name')}`:")
+            lines.append(str(data["info"])[:2000])
+        else:
+            models = data.get("models") or []
+            if not models:
+                lines.append("No Ollama models are currently loaded." if "running" in query
+                             else "No installed Ollama models were listed.")
+            else:
+                label = "loaded" if data.get("operation") == "running_models" else "installed"
+                lines.append(f"{len(models)} {label} Ollama model" + ("s:" if len(models) != 1 else ":"))
+                for item in models[:40]:
+                    size = item.get("size") or item.get("parameter_size") or ""
+                    extra = f" · {size}" if size else ""
+                    lines.append(f"- {item.get('name')}{extra}")
+    if system_data:
+        system = system_data[0].get("system") or {}
+        if system.get("local_datetime"):
+            zone = " ".join(part for part in (system.get("timezone") or "",
+                                              f"({system['utc_offset']})" if system.get("utc_offset") else "")
+                            if part)
+            lines.append(f"{system.get('readable')} {zone}".strip())
+        elif system.get("file_count") is not None or system.get("dir_count") is not None:
+            files = system.get("file_count") or 0
+            folders = system.get("dir_count") or 0
+            lines.append(f"{files} files, {folders} folders in `{system.get('cwd') or 'the current directory'}` "
+                         "('.' and '..' excluded).")
+            if files + folders == 0:
+                lines.append("The directory is empty.")
+            workspace = system.get("workspace")
+            if workspace and workspace != system.get("cwd"):
+                lines.append(f"TACU workspace: `{workspace}`")
+        elif system.get("cwd") and any(word in query for word in
+                                       ("directory", "path", "pwd", "cwd", "where", "workspace")):
+            lines.append(f"Current directory: `{system['cwd']}`")
+            workspace = system.get("workspace")
+            if workspace:
+                lines.append(f"TACU workspace: `{workspace}`")
+        elif wants_name and hostname:
+            pass
+        else:
+            if system.get("mac_ver"):
+                lines.append(f"macOS {system['mac_ver']} ({system.get('architecture')})")
+            elif system.get("platform"):
+                lines.append(str(system["platform"]))
+            if system.get("memory_gib"):
+                lines.append(f"Installed memory: {system['memory_gib']} GiB")
+            if system.get("cpu_count"):
+                lines.append(f"CPU count: {system['cpu_count']}")
+            if system.get("volumes"):
+                lines.append("Mounted volumes:")
+                lines.extend(str(row) for row in system["volumes"][:8])
+            if system.get("power"):
+                lines.append(str(system["power"]).splitlines()[0])
+            if system.get("hardware_profile"):
+                lines.append(str(system["hardware_profile"]).strip().splitlines()[0])
+    if extra_net:
+        data = extra_net[0]
+        if data.get("routes"):
+            lines.append("Routing table:")
+            lines.extend(str(row) for row in data["routes"][:12])
+        elif data.get("dns"):
+            lines.append("DNS configuration:")
+            lines.extend(str(data["dns"]).splitlines()[:12])
+        elif data.get("arp"):
+            lines.append(f"{len(data['arp'])} ARP entries:")
+            lines.extend(f"- {row}" for row in data["arp"][:10])
+        elif data.get("operation") == "resolve" or data.get("records") is not None:
+            host = data.get("host") or "that host"
+            records = str(data.get("records") or "").strip()
+            if records:
+                lines.append(f"DNS records for `{host}`:")
+                lines.append(records)
+            else:
+                kind = "PTR" if data.get("reverse") else "A/AAAA"
+                lines.append(f"No {kind} record for `{host}`.")
+    if service_data:
+        data = service_data[0]
+        services = data.get("services") or []
+        if data.get("detail"):
+            lines.append(f"Service `{data.get('label') or data.get('query')}`:")
+            lines.append(str(data["detail"])[:1500])
+        elif not services:
+            lines.append("No matching services were found.")
+        else:
+            running = sum(1 for item in services if item.get("running"))
+            lines.append(f"{len(services)} service(s) listed ({running} running):")
+            lines.extend(f"- {item.get('label')} (PID {item.get('pid') or '-'})" for item in services[:15])
+    if package_data:
+        data = package_data[0]
+        packages = data.get("packages") or []
+        if not packages:
+            lines.append("No matching packages were found.")
+        else:
+            lines.append(f"{len(packages)} package(s):")
+            for item in packages[:15]:
+                lines.append(f"- {item.get('name') or item.get('line')} {item.get('version') or item.get('desc') or ''}".rstrip())
+    if security_data:
+        data = security_data[0]
+        if data.get("gatekeeper"):
+            lines.append(f"Gatekeeper: {data['gatekeeper']}")
+        if data.get("quarantined") is not None:
+            lines.append(f"`{data.get('path')}` is {'quarantined' if data['quarantined'] else 'not quarantined'}.")
+        if data.get("sha256"):
+            lines.append(f"SHA-256 (`{data.get('path')}`): {data['sha256']}")
+        signature = data.get("signature")
+        if isinstance(signature, dict):
+            lines.append(f"Signature for `{signature.get('path')}`: {signature.get('identifier') or signature.get('output', '')[:400]}")
+        elif signature:
+            lines.append(str(signature)[:800])
+    if not lines:
+        return None
+    collapsed: list[str] = []
+    for line in lines:
+        if collapsed and collapsed[-1] == line:
+            continue
+        collapsed.append(line)
+    text = "\n".join(collapsed)
+    if docker_data or ollama_data or git_data:
+        return text
+    if "Next:" not in text:
+        if any("directory" in line.casefold() or "files," in line for line in lines):
+            text += "\n\nNext: Use this directory as the TACU workspace?"
+        else:
+            text += "\n\nNext: Inspect a specific PID, port, or application in more detail?"
+    return text

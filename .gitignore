@@ -1,0 +1,64 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.cursor/
+*.swp
+
+# Secrets and local env — never ship
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+credentials.json
+secrets.json
+
+# TACU runtime data (lives in ~/.local/share/tacu, not this repo)
+*.db
+history.db
+clipboard.db
+harness.db
+ghost_cmds.log
+
+# Local holding pen (scratch, captures, old wheels, planning notes)
+not_required/
+
+# Local TACU test runtime and captured evidence.
+/.tmp-tacu-test/
+
+# Accidental recreations of old scratch paths at the repo root
+temp_remove/
+note.txt
+utils/wireshark_filters.csv
+*.pcap
+*.pcapng
+*.cap
+enhancement_plans/
+
+# Creator/admin-only release validation harness and generated reports.
+# It intentionally does not ship in the public TACU repository or package.
+/pre_release_tests/
+
+# Accidental dumps
+*.log
+artifacts/
+exports/
