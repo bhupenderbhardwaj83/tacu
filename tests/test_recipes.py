@@ -105,6 +105,7 @@ class SyntaxCliTests(unittest.TestCase):
             home = Path(directory)
             output = io.StringIO()
             with patch.object(cli, "app_home", return_value=home), \
+                 patch.object(cli, "_clipboard_command", return_value=["pbcopy"]), \
                  patch.object(cli.subprocess, "run") as run, \
                  redirect_stdout(output):
                 self.assertEqual(cli.main(["syntax", "seed"]), 0)

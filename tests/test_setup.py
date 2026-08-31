@@ -296,12 +296,18 @@ class SetupTests(unittest.TestCase):
             self.assertIn(configuration.SEARXNG_CONTAINER, docker_containers.read_text().splitlines())
             checked = subprocess.run([str(user_bin / "ticu"), "doctor", "--json"], cwd=root, env=environment,
                                      capture_output=True, text=True, timeout=20)
-            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
             payload = json.loads(checked.stdout)
-            self.assertTrue(payload["ready"])
             self.assertTrue(payload["docker_installed"])
             self.assertTrue(payload["searxng_image"])
             self.assertTrue(payload["searxng_running"])
+            # `ready` also gates on the host's own RAM and disk. A CI runner or a
+            # small container legitimately sits below the 16 GB floor, so assert what
+            # this installation controls and let doctor stay honest about hardware.
+            if payload["ram_ok"] and payload["disk_ok"]:
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                self.assertTrue(payload["ready"])
+            else:
+                self.assertFalse(payload["ready"], "doctor must not claim readiness below the floor")
             short = subprocess.run([str(user_bin / "ti"), "--version"], cwd=root, env=environment,
                                    capture_output=True, text=True, timeout=20)
             self.assertEqual(short.returncode, 0, short.stderr)

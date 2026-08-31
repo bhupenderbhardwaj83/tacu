@@ -46,7 +46,8 @@ from .harness import (
 )
 from .routing import (
     HOST_MUTATE_KEYS, directory_target_from_intent, extract_file_write, intent_mutates_workspace,
-    is_shell_cd_intent, intent_host_domain, intent_wants_host_mutate, native_steps_for_intent,
+    is_shell_cd_intent, intent_host_domain, intent_is_explanatory, intent_wants_host_mutate,
+    native_steps_for_intent,
 )
 from .completion import completion_script, shell_initialization
 from .model_context import compact_evidence
@@ -4393,10 +4394,18 @@ def _main(argv: list[str] | None = None) -> int:
                                 dim=False,
                             ))
                         return 0
-                # `ti ask` is a words/evidence workflow and is documented never to
-                # inspect the host.  Host terms such as "RAM" or "disk" may be the
-                # subject of an explanation, so do not silently promote this command
-                # to `ti auto`.  Users who want current machine facts choose auto.
+                # A question about this machine gets a real answer from a native tool.
+                # Explanatory wording ("explain RAM versus disk") is a language task, so
+                # it stays here and is never promoted to a host inspection.
+                if (query and not intent_is_explanatory(query)
+                        and native_steps_for_intent(query)
+                        and not exact_answer(query, evidence)):
+                    arguments.subcommand = "auto"
+                    arguments.intent = query.split()
+                    arguments.workspace = getattr(arguments, "workspace", None)
+                    arguments.max_steps = getattr(arguments, "max_steps", 3)
+                    arguments.dry_run = False
+                    return handle_intent_command(arguments, client)
                 ask(store=store, client=client, query=query, tool_result=evidence, stream=stream)
             elif arguments.subcommand in {"run", "companion", "focus"}:
                 argv = normalized_command(arguments.command)

@@ -367,6 +367,81 @@ class ConversationAndExportTests(unittest.TestCase):
         auto_handler.assert_not_called()
 
 
+class AskAnswersHostFactsDefinitivelyTests(unittest.TestCase):
+    """`ti ask` must answer a question about this machine, not describe how to ask it.
+
+    Regression guard: promotion was removed wholesale to stop "explain RAM versus
+    disk" triggering host inspection, which also silenced real host questions.
+    Both behaviours are pinned here so neither can be lost again.
+    """
+
+    HOST_FACTS = (
+        "tell me the full path of the current directory",
+        "which directory am i in",
+        "what directory am i in",
+        "which folder am i in",
+        "which process is consuming max cpu",
+        "what is my primary IP",
+    )
+    EXPLANATIONS = (
+        "explain the difference between RAM and disk in two sentences",
+        "explain split-horizon DNS",
+        "what is a symlink",
+        "how does RAM work",
+        "why is a disk slower than memory",
+    )
+
+    def _run(self, question: str) -> bool:
+        """Return True when `ti ask` promoted the question to a native tool."""
+
+        class Provider:
+            model = "fake-model"
+
+            def chat(self, _messages, *, stream):
+                del stream
+                yield "a language answer"
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict("os.environ", {"TACU_HOME": directory}), \
+             patch.object(cli.sys.stdin, "isatty", return_value=True), \
+             patch("tacu.cli.load_provider", return_value=Provider()), \
+             patch("tacu.cli.handle_intent_command", return_value=0) as promoted, \
+             redirect_stdout(io.StringIO()):
+            cli.main(["--no-stream", "ask", *question.split()])
+        return promoted.called
+
+    def test_host_questions_are_answered_from_the_machine(self) -> None:
+        for question in self.HOST_FACTS:
+            with self.subTest(question=question):
+                self.assertTrue(self._run(question),
+                                f"{question!r} should use a native tool, not prose")
+
+    def test_explanations_stay_language_only(self) -> None:
+        for question in self.EXPLANATIONS:
+            with self.subTest(question=question):
+                self.assertFalse(self._run(question),
+                                 f"{question!r} is a language task and must not inspect the host")
+
+    def test_explanatory_classifier_separates_the_two(self) -> None:
+        from tacu.routing import intent_is_explanatory
+
+        for question in self.EXPLANATIONS:
+            self.assertTrue(intent_is_explanatory(question), question)
+        for question in self.HOST_FACTS:
+            self.assertFalse(intent_is_explanatory(question), question)
+
+    def test_directory_phrasings_reach_the_cwd_capability(self) -> None:
+        from tacu.routing import native_steps_for_intent
+
+        for question in ("which directory am i in", "what directory am i in",
+                         "which folder am i in", "tell me the full path of the current directory",
+                         "print working directory", "where am i"):
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, f"no native step for {question!r}")
+            self.assertEqual((steps[0]["tool"], steps[0]["operation"]), ("system", "cwd"),
+                             f"{question!r} did not reach the cwd capability")
+
+
 class ColorDetectionTests(unittest.TestCase):
     """Colour follows the stream actually being written to, not the one at import."""
 
@@ -472,7 +547,9 @@ class IdentityTests(unittest.TestCase):
             with core.HistoryStore(Path(directory) / "history.db") as store:
                 store.add(model="m", query="one", response="first answer\nsecond line", tool_result=None)
                 store.add(model="m", query="two", response="latest A\nlatest B\nlatest C", tool_result=None)
-            with patch.object(cli.subprocess, "run", side_effect=fake_run), redirect_stdout(io.StringIO()):
+            with patch.object(cli.subprocess, "run", side_effect=fake_run), \
+                 patch.object(cli, "_clipboard_command", return_value=["pbcopy"]), \
+                 redirect_stdout(io.StringIO()):
                 self.assertEqual(cli.main(["copy"]), 0)
                 self.assertEqual(cli.main(["copy", "last"]), 0)
                 self.assertEqual(cli.main(["copy", "last:1"]), 0)

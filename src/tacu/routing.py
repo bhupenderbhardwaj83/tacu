@@ -238,6 +238,31 @@ def intent_writes_or_serves(intent: str) -> bool:
     return serving or (creating and fileish)
 
 
+_EXPLANATORY = re.compile(
+    r"(?i)(?:"
+    r"\bexplain\b|\bexplanation\b|"
+    r"\bdifference between\b|"
+    r"\bhow (?:does|do|would|can) .*\bwork\b|"
+    r"\bwhy (?:does|do|is|are|would)\b|"
+    r"\bwhat (?:does|do) .*\bmean\b|"
+    r"\bmeaning of\b|"
+    r"\bdefine\b|"
+    r"\bwhat (?:is|are) an? \b"
+    r")"
+)
+
+
+def intent_is_explanatory(intent: str) -> bool:
+    """True when the question asks what something *is*, not what this machine holds.
+
+    Host words are often the subject of a lesson ("explain RAM versus disk"), so
+    `ti ask` must answer those in words. Anything without this framing is a real
+    question about the machine and may use a native tool.
+    """
+
+    return bool(_EXPLANATORY.search(intent or ""))
+
+
 @dataclass(frozen=True)
 class Capability:
     tool: str
@@ -310,7 +335,10 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability("system", "cwd",
                ("current directory", "full path of the current", "working directory", "where am i",
                 "share the full path", "pwd of", "current workspace", "workspace we are in",
-                "what is the current workspace", "show directory", "show current directory"),
+                "what is the current workspace", "show directory", "show current directory",
+                "which directory am i", "what directory am i", "directory am i in",
+                "which folder am i", "folder am i in", "which directory is this",
+                "print working directory", "where are we"),
                ("cwd", "pwd", "workspace"),
                "Report the current working directory and TACU workspace"),
     Capability("system", "listing",
