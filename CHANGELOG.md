@@ -2,6 +2,20 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.2.1] - 2026-09-05
+
+### Fixed
+
+- Certificate attribution probed only 12 endpoints while a browsing machine holds tens
+  open, so a connected CDN-fronted site could be reported as not connected. Coverage now
+  matches a real machine and the endpoints sharing the resolved prefix are checked first.
+- A negative answer said "checked N of M" when all M were probed and only N replied.
+
+### Changed
+
+- `ti tools --help` lists every native tool, grouped, with the count. The list is derived
+  from the registry, so a new tool can never be missing from it.
+
 ## [0.2.0] - 2026-09-05
 
 ### Added
@@ -46,5 +60,6 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.2.1]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.1
 [0.2.0]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.0
 [0.1.0]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.1.0

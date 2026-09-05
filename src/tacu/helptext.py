@@ -304,8 +304,52 @@ def print_copy_help() -> None:
     _more("clip", "review", "syntax")
 
 
+# The file commands above already have friendly names, so they are not repeated below.
+_FRIENDLY_TOOLS = ("repo_map", "search_code", "read_file", "write_file", "edit_file")
+# Grouping is presentational only. Any tool missing from it still appears under MORE,
+# so adding a tool can never make it invisible here.
+_TOOL_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("HOST & SYSTEM", "facts about this machine",
+     ("process", "network", "system", "application", "service", "package", "ollama")),
+    ("SECURITY & FORENSICS", "is this machine clean",
+     ("forensics", "security")),
+    ("CODE & CONTAINERS", "repos, images, tests",
+     ("git", "docker", "run_tests", "diagnostics", "inspect_symbol")),
+    ("WORKSPACE", "files, shell, task state",
+     ("filesystem", "shell", "task_state")),
+    ("FILE CONTRACTS", "the tools behind the commands above",
+     ("repo_map", "search_code", "read_file", "write_file", "edit_file")),
+)
+
+
+def _print_native_tool_groups() -> None:
+    """Render the native tools from the registry, so this can never go stale."""
+
+    from .tools import specs
+
+    available = {spec.name: spec for spec in specs()}
+    shown: set[str] = set()
+    print(paint(f"HOST TOOLS ({len(available)} native tools · ti auto picks from these)",
+                PALETTE.violet + PALETTE.bold))
+    for title, gist, names in _TOOL_GROUPS:
+        present = [name for name in names if name in available]
+        if not present:
+            continue
+        shown.update(present)
+        print(paint(f"  {title:<22}", PALETTE.accent) + paint(gist, PALETTE.muted))
+        print(paint(f"    {'  '.join(present)}", PALETTE.reset))
+    remaining = sorted(set(available) - shown)
+    if remaining:
+        print(paint(f"  {'MORE':<22}", PALETTE.accent) + paint("newer tools", PALETTE.muted))
+        print(paint(f"    {'  '.join(remaining)}", PALETTE.reset))
+    print(paint("  Ask in words — ti auto which process is consuming most CPU — or call one "
+                "directly:", PALETTE.muted))
+    print(paint("    ti tools describe forensics    ti tools list    ti help forensics",
+                PALETTE.muted))
+
+
 def print_tools_help() -> None:
-    print(_heading("ti tools — workspace file & host tools"))
+    print(_heading("ti tools — workspace files, host facts, and forensics"))
     print(paint("WHAT: Map, find, search, read, write, and edit files inside the TACU workspace guard.", PALETTE.text))
     print(paint("WHEN: You want structured file work without inventing shell pipelines.", PALETTE.text))
     print()
@@ -342,10 +386,11 @@ def print_tools_help() -> None:
                 PALETTE.muted))
     print(paint("  Add --json to map, find, search, read, write, or edit when a script consumes the output.", PALETTE.muted))
     print()
+    _print_native_tool_groups()
+    print()
     print(paint("DISCOVERY", PALETTE.violet + PALETTE.bold))
     _entry("list", "ti tools list", "ti tools list",
-           "Lists every native tool TACU can call, which is the menu ti auto chooses from behind "
-           "the scenes.")
+           "The same tools with their risk level and full purpose line.")
     _entry("describe", "ti tools describe TOOL", "ti tools describe process",
            "Shows one tool's input contract and its risk level, so you know what fields it accepts "
            "before calling it.")

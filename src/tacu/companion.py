@@ -425,7 +425,7 @@ def _host_connection_answer(facts: dict[str, Any]) -> str | None:
         probed = facts.get("certificate_checked") or 0
         outstanding = facts.get("unattributed_tls") or 0
         if outstanding:
-            lines.append(f"Checked the certificates of {probed} of {outstanding} other TLS "
+            lines.append(f"Read certificates from {probed} of {outstanding} other TLS "
                          "endpoints; none serve that name.")
         return "\n".join(lines)
     owners: list[str] = []

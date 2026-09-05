@@ -79,8 +79,11 @@ REVERSE_LOOKUP_CAP = 80
 REVERSE_LOOKUP_TIMEOUT = 1.5
 
 
-CERTIFICATE_PROBE_CAP = 12
-CERTIFICATE_PROBE_TIMEOUT = 4.0
+# A browsing machine holds tens of TLS sockets open, so a small cap silently turns
+# "did not check" into "not connected". Cover the realistic count, in parallel.
+CERTIFICATE_PROBE_CAP = 64
+CERTIFICATE_PROBE_WORKERS = 24
+CERTIFICATE_PROBE_TIMEOUT = 3.0
 RESOLVE_ROUNDS = 3
 
 
@@ -123,11 +126,38 @@ def _certificate_names(address: str, sni: str, port: int = 443) -> list[str]:
     return [value for key, value in certificate.get("subjectAltName", ()) if key == "DNS"]
 
 
-def _certificate_map(addresses: list[str], sni: str) -> dict[str, list[str]]:
-    targets = addresses[:CERTIFICATE_PROBE_CAP]
+def _probe_order(addresses: list[str], resolved: list[str]) -> list[str]:
+    """Check the endpoints most likely to be the asked host first.
+
+    A CDN answers from one edge range, so an address sharing a prefix with what
+    DNS returned is the better guess when the cap bites.
+    """
+
+    def prefix(address: str, parts: int) -> str:
+        return ".".join(address.split(".")[:parts])
+
+    near24 = {prefix(item, 3) for item in resolved if ":" not in item}
+    near16 = {prefix(item, 2) for item in resolved if ":" not in item}
+
+    def rank(address: str) -> int:
+        if ":" in address:
+            return 3
+        if prefix(address, 3) in near24:
+            return 0
+        if prefix(address, 2) in near16:
+            return 1
+        return 2
+
+    return sorted(addresses, key=rank)
+
+
+def _certificate_map(addresses: list[str], sni: str,
+                     resolved: list[str] | None = None) -> dict[str, list[str]]:
+    ordered = _probe_order(addresses, resolved or [])
+    targets = ordered[:CERTIFICATE_PROBE_CAP]
     if not targets:
         return {}
-    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+    with ThreadPoolExecutor(max_workers=min(CERTIFICATE_PROBE_WORKERS, len(targets))) as pool:
         names = pool.map(lambda address: (address, _certificate_names(address, sni)), targets)
     return {address: found for address, found in names if found}
 
@@ -215,7 +245,8 @@ def _host_matches(rows: list[dict[str, Any]], host: str) -> dict[str, Any]:
     # Behind a CDN or WAF the address and its PTR record name the provider, not the
     # site, so neither can answer the question. Ask the endpoints already connected
     # on 443 which names they serve.
-    certificates = _certificate_map(unattributed, wanted) if wanted and unattributed else {}
+    certificates = (_certificate_map(unattributed, wanted, addresses)
+                    if wanted and unattributed else {})
     for row in rows:
         remote = str(row.get("remote_host") or "")
         served = certificates.get(remote) or []

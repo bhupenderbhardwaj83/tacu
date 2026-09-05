@@ -1023,3 +1023,43 @@ class SingleVersionSourceTests(unittest.TestCase):
         spec.loader.exec_module(module)
         self.assertEqual(module.VERSION, __version__)
         self.assertIn(f"Version: {__version__}", module._metadata())
+
+
+class ToolDiscoverabilityTests(unittest.TestCase):
+    """`ti tools --help` must never imply TACU has fewer tools than it has."""
+
+    def _help_text(self) -> str:
+        from tacu.helptext import print_tools_help
+        from tacu.theme import strip_ansi
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            print_tools_help()
+        return strip_ansi(output.getvalue())
+
+    def test_every_registered_tool_is_named_in_the_help(self) -> None:
+        from tacu.tools import specs
+
+        text = self._help_text()
+        for spec in specs():
+            self.assertIn(spec.name, text, f"{spec.name} is registered but invisible in ti tools --help")
+
+    def test_the_help_states_the_real_tool_count(self) -> None:
+        from tacu.tools import specs
+
+        self.assertIn(f"{len(specs())} native tools", self._help_text())
+
+    def test_an_ungrouped_tool_still_surfaces(self) -> None:
+        from tacu import helptext
+
+        groups = tuple(item for item in helptext._TOOL_GROUPS if item[0] != "HOST & SYSTEM")
+        with patch.object(helptext, "_TOOL_GROUPS", groups):
+            text = self._help_text()
+        # process is no longer in any group, so it must appear under MORE.
+        self.assertIn("MORE", text)
+        self.assertIn("process", text)
+
+    def test_the_help_points_at_the_full_listing(self) -> None:
+        text = self._help_text()
+        self.assertIn("ti tools list", text)
+        self.assertIn("ti tools describe", text)

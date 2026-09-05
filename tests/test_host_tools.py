@@ -964,7 +964,7 @@ class CdnFrontedDomainTests(unittest.TestCase):
     def test_only_already_connected_tls_endpoints_are_probed(self) -> None:
         seen: list[str] = []
 
-        def record(addresses, sni):
+        def record(addresses, sni, resolved=None):
             seen.extend(addresses)
             return {}
 
@@ -1051,3 +1051,20 @@ class ElevatedForensicsTests(unittest.TestCase):
         self.assertTrue(sudo_calls)
         for argv in sudo_calls:
             self.assertEqual(argv[1], "-n", "sudo must never be allowed to prompt")
+
+
+class CertificateCoverageTests(unittest.TestCase):
+    """A small probe cap turns "did not check" into a false "not connected"."""
+
+    def test_coverage_matches_a_real_browsing_machine(self) -> None:
+        self.assertGreaterEqual(tacu_network.CERTIFICATE_PROBE_CAP, 48)
+
+    def test_endpoints_sharing_the_resolved_prefix_are_probed_first(self) -> None:
+        addresses = ["8.8.8.8", "45.60.99.1", "203.0.113.7", "45.60.12.5"]
+        ordered = tacu_network._probe_order(addresses, ["45.60.12.77"])
+        self.assertEqual(ordered[0], "45.60.12.5", "same /24 as DNS should be checked first")
+        self.assertEqual(ordered[1], "45.60.99.1", "same /16 next")
+
+    def test_ordering_keeps_every_candidate(self) -> None:
+        addresses = ["1.1.1.1", "45.60.12.5", "2606:4700::1111"]
+        self.assertCountEqual(tacu_network._probe_order(addresses, ["45.60.12.77"]), addresses)
