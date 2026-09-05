@@ -1078,3 +1078,81 @@ class ToolDiscoverabilityTests(unittest.TestCase):
         text = self._help_text()
         self.assertIn("ti tools list", text)
         self.assertIn("ti tools describe", text)
+
+    def test_tools_list_uses_the_same_entry_format(self) -> None:
+        from tacu.helptext import print_native_tool_listing
+        from tacu.theme import strip_ansi
+        from tacu.tools import specs
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            print_native_tool_listing()
+        text = strip_ansi(output.getvalue())
+        for spec in specs():
+            line = next((row for row in text.splitlines() if row.startswith(f"  {spec.name} ")), "")
+            self.assertTrue(line, f"{spec.name} missing from ti tools list")
+            self.assertIn("|  e.g. ", line, f"{spec.name} shows no example")
+            self.assertIn(f"[{spec.risk_level}]", text, f"{spec.name} shows no risk level")
+
+
+class ReleaseHistoryTests(unittest.TestCase):
+    """`ti version --history` must work from an install, not only a checkout."""
+
+    def test_history_is_parsed_newest_first_with_dates(self) -> None:
+        from tacu.core import release_history
+
+        releases = release_history()
+        self.assertTrue(releases, "no release history was found")
+        versions = [version for version, _date, _notes in releases]
+        self.assertEqual(versions[0], __version__, "the newest entry should be this version")
+        self.assertIn("0.1.0", versions)
+        for _version, date, notes in releases:
+            self.assertRegex(date, r"^\d{4}-\d{2}-\d{2}$")
+            self.assertTrue(notes, "a release with no notes is not useful")
+
+    def test_a_wrapped_bullet_is_joined_into_one_note(self) -> None:
+        from tacu import core
+
+        source = (
+            "# Changelog\n\n"
+            "## [9.9.9] - 2030-01-01\n\n"
+            "### Added\n\n"
+            "- A sentence that wraps\n  onto a second line.\n"
+            "- A second note.\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CHANGELOG.md"
+            path.write_text(source, encoding="utf-8")
+            with patch.object(core.Path, "is_file", lambda self: str(self) == str(path)), \
+                 patch.object(core.Path, "read_text", lambda self, **kw: source), \
+                 patch("tacu.core.Path.with_name", lambda self, name: path):
+                releases = core.release_history()
+        self.assertEqual(len(releases), 1)
+        _version, _date, notes = releases[0]
+        self.assertEqual(notes, ["A sentence that wraps onto a second line.", "A second note."])
+
+    def test_the_changelog_travels_inside_the_wheel(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        backend = (root / "tacu_build_backend.py").read_text(encoding="utf-8")
+        self.assertIn("CHANGELOG.md", backend,
+                      "an installed TACU cannot show history the wheel does not carry")
+
+    def test_the_command_lists_every_version_and_marks_the_installed_one(self) -> None:
+        from tacu.core import release_history
+        from tacu.theme import strip_ansi
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(cli.main(["version", "--history"]), 0)
+        text = strip_ansi(output.getvalue())
+        for version, _date, _notes in release_history():
+            self.assertIn(version, text)
+        self.assertIn("← installed", text)
+
+    def test_plain_version_is_unchanged(self) -> None:
+        from tacu.theme import strip_ansi
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(cli.main(["version"]), 0)
+        self.assertEqual(strip_ansi(output.getvalue()).strip(), f"TACU {__version__}")

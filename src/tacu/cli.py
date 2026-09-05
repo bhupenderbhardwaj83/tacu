@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from datetime import datetime
@@ -51,7 +52,9 @@ from .routing import (
 )
 from .completion import completion_script, shell_initialization
 from .model_context import compact_evidence
-from .helptext import dispatch_help, print_quick_help, print_tool_guide, run_tutorial
+from .helptext import (
+    dispatch_help, print_native_tool_listing, print_quick_help, print_tool_guide, run_tutorial,
+)
 from .ingest_filter import (
     FilterOptions, apply_pipe_filter, filter_options_from_namespace, render_filter_only,
 )
@@ -77,7 +80,7 @@ from .core import (
     colorize_output, content_result, detect_juicy, wants_juicy, HIGH_JUICY_KINDS,
     docker_command, evidence_text, export_findings, local_time_context, migrate_legacy_home,
     normalized_command,
-    read_text_blocks, run_command, scan_juicy_stream,
+    read_text_blocks, release_history, run_command, scan_juicy_stream,
 )
 from .juicy import (
     JuicyQuestion, finding_where, format_juicy_report, kind_matches_query, meets_confidence,
@@ -3468,7 +3471,9 @@ def parser() -> argparse.ArgumentParser:
     shell_init_parser.add_argument(
         "shell", nargs="?", choices=("auto", "zsh", "bash", "fish", "powershell"), default="auto"
     )
-    command_parser("version", "show TACU's installed version", "ti version")
+    version_parser = command_parser("version", "show TACU's installed version", "ti version --history")
+    version_parser.add_argument("--history", action="store_true",
+                                help="list every released version with its notes")
     command_parser("models", "list models from the active provider", "ticu models")
     model_parser = command_parser("model", "view or change TACU's persistent AI model", "ticu model")
     model_sub = model_parser.add_subparsers(dest="model_action")
@@ -4186,7 +4191,30 @@ def _main(argv: list[str] | None = None) -> int:
         print("tacu: --timeout must be positive", file=sys.stderr); return 2
     try:
         if arguments.subcommand == "version":
-            print(f"TACU {__version__}")
+            if not getattr(arguments, "history", False):
+                print(f"TACU {__version__}")
+                return 0
+            releases = release_history()
+            if not releases:
+                print(f"TACU {__version__}")
+                print(paint("No release history shipped with this build. "
+                            "See https://github.com/bhupenderbhardwaj83/tacu/releases", PALETTE.muted))
+                return 0
+            print(paint(f"TACU {__version__} · {len(releases)} released version"
+                        + ("s" if len(releases) != 1 else ""), PALETTE.accent + PALETTE.bold))
+            for version, date, notes in releases:
+                marker = "  ← installed" if version == __version__ else ""
+                stamp = f" · {date}" if date else ""
+                print()
+                print(paint(f"{version}{stamp}{marker}", PALETTE.green + PALETTE.bold))
+                width = max(48, min(shutil.get_terminal_size((100, 24)).columns, 110)) - 4
+                for note in notes[:6]:
+                    wrapped = textwrap.wrap(note, width=width) or [note]
+                    print(paint(f"  - {wrapped[0]}", PALETTE.muted))
+                    for continuation in wrapped[1:]:
+                        print(paint(f"    {continuation}", PALETTE.muted))
+                if len(notes) > 6:
+                    print(paint(f"  … {len(notes) - 6} more, see CHANGELOG.md", PALETTE.muted))
             return 0
         if arguments.subcommand in {"all", "tutorial", "guide"}:
             return run_tutorial(arguments.topic)
@@ -4299,15 +4327,7 @@ def _main(argv: list[str] | None = None) -> int:
             if arguments.tools_action == "list":
                 if arguments.json: print(json.dumps([spec.as_dict() for spec in available.values()], indent=2))
                 else:
-                    shortcuts = {"repo_map": "tools map", "search_code": "tools search",
-                                 "read_file": "tools read", "write_file": "tools write",
-                                 "edit_file": "tools edit"}
-                    print(paint("NATIVE TOOL       RISK      SIMPLE COMMAND       PURPOSE", PALETTE.accent + PALETTE.bold))
-                    for spec in available.values():
-                        shortcut = shortcuts.get(spec.name, "tools run")
-                        print(_command_line_tool(spec.name, spec.risk_level, shortcut, spec.description))
-                    print()
-                    print(paint("Start with: ti tools examples", PALETTE.green + PALETTE.bold))
+                    print_native_tool_listing()
                 return 0
             if arguments.tools_action == "examples":
                 print_tool_guide(); return 0

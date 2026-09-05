@@ -65,6 +65,10 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None) 
     files: dict[str, bytes] = {}
     for path in sorted((ROOT / "src" / "tacu").rglob("*.py")):
         files[path.relative_to(ROOT / "src").as_posix()] = path.read_bytes()
+    # Ship the release history so `ti version --history` works from an install too.
+    changelog = ROOT / "CHANGELOG.md"
+    if changelog.is_file():
+        files[f"{NAME}/CHANGELOG.md"] = changelog.read_bytes()
     files[f"{DIST_INFO}/METADATA"] = _metadata().encode()
     files[f"{DIST_INFO}/WHEEL"] = b"Wheel-Version: 1.0\nGenerator: tacu-build\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
     files[f"{DIST_INFO}/entry_points.txt"] = b"[console_scripts]\nticu = tacu.cli:main\n"
@@ -82,7 +86,7 @@ def build_sdist(sdist_directory, config_settings=None) -> str:
     filename = f"{NAME}-{VERSION}.tar.gz"
     target = Path(sdist_directory) / filename
     included = [Path("pyproject.toml"), Path("tacu_build_backend.py"), Path("README.md"), Path("LICENSE"),
-                Path("install.sh"), Path("install.ps1")]
+                Path("CHANGELOG.md"), Path("install.sh"), Path("install.ps1")]
     included.extend(path.relative_to(ROOT) for path in (ROOT / "src" / "tacu").rglob("*.py"))
     with tarfile.open(target, "w:gz") as archive:
         for relative in included:

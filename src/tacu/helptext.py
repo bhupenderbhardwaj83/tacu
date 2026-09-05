@@ -372,25 +372,32 @@ def _tool_shape(spec: Any) -> str:
     return f"operation: {'|'.join(shown)}"
 
 
-def _tool_summary(spec: Any) -> str:
-    """First sentence of the contract description, plus how to ask in words."""
+def _tool_summary(spec: Any, *, full: bool) -> str:
+    """What the tool is for, and how to reach it.
+
+    `full` keeps the contract's whole description and prefixes its risk level, which
+    is what `ti tools list` is for; the short form suits an at-a-glance --help.
+    """
 
     text = " ".join((spec.description or "").split())
-    first, _, _rest = text.partition(". ")
-    summary = (first or text).rstrip(".")
+    if not full:
+        first, _, _rest = text.partition(". ")
+        text = first or text
     example = _TOOL_EXAMPLES.get(spec.name, "")
-    if example.startswith("ti auto") or example.startswith("ti do"):
-        return f"{summary}. Ask in words, or call the contract with ti tools run {spec.name}."
-    return f"{summary}. Call it with ti tools run {spec.name} --input 'JSON'."
+    if example.startswith(("ti auto", "ti do")):
+        reach = f"Ask in words, or call the contract with ti tools run {spec.name}."
+    else:
+        reach = f"Call it with ti tools run {spec.name} --input 'JSON'."
+    body = f"{text.rstrip('.')}. {reach}"
+    return f"[{spec.risk_level}] {body}" if full else body
 
 
-def _print_native_tool_groups() -> None:
+def _print_native_tool_groups(*, full: bool = False) -> None:
+    """Render every native tool in the shared entry format, grouped by area."""
+
     from .tools import specs
 
-    global _TOOL_NAME_WIDTH
-
     available = {spec.name: spec for spec in specs()}
-    grouped: set[str] = set()
     sections = list(_TOOL_GROUPS)
     leftover = [name for name in available if not any(name in names for _, names in sections)]
     if leftover:
@@ -399,14 +406,30 @@ def _print_native_tool_groups() -> None:
         present = [name for name in names if name in available]
         if not present:
             continue
-        grouped.update(present)
         print()
         print(paint(title, PALETTE.violet + PALETTE.bold))
         for name in present:
             spec = available[name]
             _entry(name, _tool_shape(spec),
                    _TOOL_EXAMPLES.get(name, f"ti tools describe {name}"),
-                   _tool_summary(spec), width=_TOOL_NAME_WIDTH)
+                   _tool_summary(spec, full=full), width=_TOOL_NAME_WIDTH)
+
+
+def print_native_tool_listing() -> None:
+    """`ti tools list` — the same entries, with risk level and the full purpose."""
+
+    from .tools import specs
+
+    print(_heading(f"ti tools list — {len(list(specs()))} native tool contracts"))
+    print(paint("WHAT: Every tool ti auto can choose, with its risk level and inputs.", PALETTE.text))
+    print(paint("WHEN: You want to know what exists before asking, or call a contract directly.",
+                PALETTE.text))
+    print()
+    _legend(fields=True)
+    _print_native_tool_groups(full=True)
+    print()
+    print(paint("TRY NEXT: ti tools describe forensics   ·   ti tools examples   ·   ti help forensics",
+                PALETTE.muted))
 
 
 def print_tools_help() -> None:
@@ -1524,6 +1547,15 @@ TOPICS = {
         "  Signed is not the same as safe, and unsigned is not the same as malicious.",
         "  Without sudo, other users' processes, root cron and system daemons are reported as",
         "  not inspected rather than skipped silently.",
+    )),
+    "version": ("TI VERSION — WHAT IS INSTALLED, AND WHAT CHANGED", (
+        "ti version prints the installed release. --history adds every released version,",
+        "its notes, and a marker on the one you are running. The changelog ships inside the",
+        "package, so this works from an install as well as from a source checkout.",
+        "Examples:",
+        "  ti version",
+        "  ti version --history",
+        "TACU follows semantic versioning: patch for fixes, minor for a new tool or command.",
     )),
     "automation": ("INTENT-FIRST EXECUTION", (
         "ti auto and ti do plan host commands. ti ask talks to the model. ti run uses a command you name.",

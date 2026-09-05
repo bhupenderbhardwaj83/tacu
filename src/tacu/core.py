@@ -60,6 +60,41 @@ class Turn:
 LEGACY_APP_NAME = "ticu"
 
 
+def release_history() -> list[tuple[str, str, list[str]]]:
+    """Parse the shipped CHANGELOG into (version, date, notes) newest first.
+
+    The file travels inside the package, so this answers the same from a checkout
+    or from an install; when it is genuinely absent the caller says so.
+    """
+
+    candidates = [Path(__file__).with_name("CHANGELOG.md"),
+                  Path(__file__).resolve().parents[2] / "CHANGELOG.md"]
+    source = next((item for item in candidates if item.is_file()), None)
+    if source is None:
+        return []
+    releases: list[tuple[str, str, list[str]]] = []
+    version = date = ""
+    notes: list[str] = []
+    for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+        heading = re.match(r"^##\s+\[([^\]]+)\](?:\s+-\s+(.+))?\s*$", line)
+        if heading:
+            if version:
+                releases.append((version, date, notes))
+            version, date, notes = heading.group(1), (heading.group(2) or "").strip(), []
+            continue
+        if not version:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            notes.append(stripped[2:].strip())
+        elif notes and stripped and not stripped.startswith(("#", "[")):
+            # A bullet wrapped onto the next line; keep the sentence whole.
+            notes[-1] = f"{notes[-1]} {stripped}"
+    if version:
+        releases.append((version, date, notes))
+    return releases
+
+
 def local_time_context(now: datetime | None = None) -> str:
     """Ground the model in this machine's own clock so "today" is never guessed.
 

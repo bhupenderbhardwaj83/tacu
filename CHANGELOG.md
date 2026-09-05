@@ -2,6 +2,19 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-05
+
+### Added
+
+- `ti version --history` lists every released version with its notes and marks the one
+  installed. The changelog now travels inside the wheel, so this answers the same from an
+  install as from a checkout.
+
+### Changed
+
+- `ti tools list` uses the same entry format as the rest of the help — name, shape,
+  runnable example, then risk level and the full purpose — instead of its own table.
+
 ## [0.2.2] - 2026-09-05
 
 ### Changed
@@ -69,6 +82,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.3.0]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.0
 [0.2.2]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.2
 [0.2.1]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.1
 [0.2.0]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.0
