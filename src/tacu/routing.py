@@ -665,6 +665,17 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("docker", "container"),
                "Show Docker container resource stats"),
     # High-value Mac ops that exist in tools but were missing from the planner catalog.
+    Capability("process", "graph",
+               ("what is running on port", "which process is using port", "what is using port",
+                "who is on port", "process on port", "running on port", "owns port",
+                "which process is running", "what process is running", "is running",
+                "what servers are running", "which servers are running", "what is serving",
+                "what is listening", "servers running", "dev server", "which server",
+                "what is my", "process running my", "who is running", "is there a process",
+                "find the server", "which app is running", "what is running",
+                "still up", "already running", "up and running"),
+               ("server", "servers", "port", "running", "listening", "process"),
+               "Correlate processes with their lineage, runtime and listening ports"),
     Capability("process", "list",
                ("list processes", "all processes", "ps aux", "show processes",
                 "list running processes", "running processes", "list all process",
@@ -890,6 +901,42 @@ _PID_PATTERNS = (
     r"\bprocess(?:es)?\s+[#]?(\d{2,7})\b",
     r"\b(?:id|identifier)\s*[:=#]?\s*(\d{3,7})\b",
 )
+
+
+# Words that describe the *asking*, not the thing asked about. Removing them leaves
+# the words that name a runtime, an entrypoint or a role.
+_PROCESS_QUESTION_WORDS = frozenset((
+    "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "is", "are",
+    "was", "were", "the", "a", "an", "my", "me", "mine", "our", "this", "that", "these",
+    "those", "there", "here", "on", "in", "at", "of", "for", "with", "and", "or", "to",
+    "do", "does", "did", "am", "i", "you", "it", "its", "please", "tell", "show", "find",
+    "list", "give", "get", "can", "could", "would", "should", "any", "all", "some",
+    "machine", "computer", "laptop", "system", "box", "host", "currently", "right", "now",
+    "process", "processes", "pid", "app", "apps", "application", "applications",
+    "running", "run", "runs", "started", "using", "used", "up",
+))
+
+
+_ROLE_WORDS = frozenset(("server", "servers", "service", "services", "daemon", "daemons",
+                         "listener", "listeners", "port", "ports"))
+
+
+def process_query_from_intent(intent: str) -> str:
+    """The words in a process question that actually name something.
+
+    "which process is running my python http server" -> "python http server". What is
+    left is matched against what each process *is*, so nothing needs to be enumerated
+    here in advance.
+    """
+
+    words = [word for word in re.split(r"[^A-Za-z0-9._+-]+", intent or "") if word]
+    kept = [word for word in words
+            if word.casefold() not in _PROCESS_QUESTION_WORDS and not word.isdigit()]
+    if kept and all(word.casefold() in _ROLE_WORDS for word in kept):
+        # "what servers are running" names a role, not a program: the default
+        # listening view already answers it.
+        return ""
+    return " ".join(kept).strip()
 
 
 def _pid_from_intent(intent: str) -> int | None:
@@ -1542,6 +1589,18 @@ def score_capability(intent: str, capability: Capability) -> int:
         score += 25
     if capability.operation == "top_cpu" and not cpuish and "top" not in text:
         score -= 40
+    if capability.tool == "process" and capability.operation == "graph":
+        # "is vite running", "is my dev server still running" — asking whether one
+        # named thing is up, which the listing operations cannot answer.
+        if re.search(r"\bis\s+\S.{0,30}?\brunning\b", text):
+            score += 50
+        # A ranking or a plain listing is answered better by the operations built
+        # for it; the graph is for finding a particular thing.
+        if any(word in text for word in ("top ", "highest", "most cpu", "most memory",
+                                         "consuming", "as per memory", "by memory", "by cpu")):
+            score -= 60
+        if re.search(r"\b(?:list|show)\s+(?:all\s+)?(?:running\s+)?process(?:es)?\b", text):
+            score -= 60
     if capability.operation == "list" and capability.tool == "process":
         if any(word in text for word in ("top", "cpu", "memory", "ram", "rss", "processing")):
             score -= 60
@@ -1891,6 +1950,15 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
             inputs["limit"] = limit_from_intent(intent, default=40)
         if capability.operation in {"connections", "port_owner"} and port:
             inputs["port"] = port
+        if capability.tool == "process" and capability.operation == "graph":
+            if port:
+                inputs["port"] = port
+            elif pid is not None:
+                inputs["pid"] = pid
+            else:
+                needle = process_query_from_intent(intent)
+                if needle:
+                    inputs["query"] = needle
         if capability.operation == "connections":
             inputs["state"] = connection_state_from_intent(intent)
             # A named host turns a ranking into a yes/no question about that host.

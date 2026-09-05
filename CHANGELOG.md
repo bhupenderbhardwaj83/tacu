@@ -2,6 +2,23 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.2] - 2026-09-06
+
+### Added
+
+- `process.graph` correlates every process with its lineage, its runtime and the ports it
+  holds, so questions like "what is running on port 8080", "which process is running my
+  python http server", "is vite running" and "what servers are running" now have answers
+  that name the PID and how to stop it. `ti help processes` documents it.
+- Runtime and role are derived from the command line and from what a process holds — a
+  listening socket is what makes something a server — rather than from a list of known
+  applications, so an unfamiliar tool is described as accurately as a familiar one.
+
+### Changed
+
+- Versioning: patch releases now carry new capabilities too. A minor bump is reserved for
+  a major step rather than every feature.
+
 ## [0.3.1] - 2026-09-05
 
 ### Fixed
@@ -94,6 +111,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.3.2]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.2
 [0.3.1]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.1
 [0.3.0]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.0
 [0.2.2]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.2

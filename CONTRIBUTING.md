@@ -38,8 +38,10 @@ On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
 
 TACU follows [semantic versioning](https://semver.org/). While the major version is `0`:
 
-- **patch** (`0.2.0` → `0.2.1`) — bug fixes and wording, no new capability.
-- **minor** (`0.2.0` → `0.3.0`) — a new tool, capability, command, or changed behaviour.
+- **patch** (`0.3.1` → `0.3.2`) — the normal bump. Fixes, wording, and new capabilities
+  alike. Most releases are patches.
+- **minor** (`0.3.x` → `0.4.0`) — reserved for a major step: a change in what TACU is for,
+  or one that changes how existing commands behave.
 - **major** stays `0` until the tool contracts and CLI surface are stable.
 
 The version lives in exactly one place, `src/tacu/__init__.py`. `pyproject.toml` declares it

@@ -14,6 +14,7 @@ from tacu.automation import CommandStep, create_plan, evaluate_policy, native_in
 from tacu.companion import exact_answer, exact_host_answer, extract_facts
 from tacu.core import terminal_result
 from tacu.host_parsers import parse_lsof_network, parse_netstat, parse_ps, summarize_destination_ports
+from tacu import procgraph
 from tacu.tools import forensics, network as tacu_network
 from tacu.routing import native_steps_for_intent
 from tacu.tools import ToolContext, invoke, specs
@@ -1152,3 +1153,116 @@ class ProcessLookupByIdTests(unittest.TestCase):
                                    [{"result": {"data": {"operation": "inspect",
                                                          "processes": [], "count": 0}}}])
         self.assertIn("No process is running with that PID", answer)
+
+
+class ProcessGraphTests(unittest.TestCase):
+    """Classification is derived from the command line, never from a list of apps."""
+
+    def test_an_interpreter_is_described_by_what_it_was_told_to_run(self) -> None:
+        cases = {
+            "python3 -m http.server 8000": ("python3", "http.server"),
+            "/usr/bin/node /app/node_modules/.bin/vite --port 5173": ("node", "vite"),
+            "/opt/Python.app/Contents/MacOS/Python -m http.server 8971": ("Python", "http.server"),
+            "ruby /srv/app/config.ru": ("ruby", "config.ru"),
+        }
+        for command, (runtime, entrypoint) in cases.items():
+            described = procgraph.describe_runtime(command)
+            self.assertEqual(described["runtime"], runtime, command)
+            self.assertEqual(described["entrypoint"], entrypoint, command)
+
+    def test_a_task_runner_is_described_by_its_subcommand(self) -> None:
+        for command, entrypoint in (("npm run dev", "run"), ("cargo run --release", "run"),
+                                    ("pnpm dev", "dev"), ("make serve", "serve")):
+            self.assertEqual(procgraph.describe_runtime(command)["entrypoint"], entrypoint, command)
+
+    def test_an_unfamiliar_binary_is_still_named_correctly(self) -> None:
+        # Nothing in this module knows what "quixotic-server" is, and it does not need to.
+        described = procgraph.describe_runtime("/opt/tools/quixotic-server --bind 0.0.0.0:9000")
+        self.assertEqual(described["runtime"], "quixotic-server")
+
+    def test_a_listening_socket_is_what_makes_something_a_server(self) -> None:
+        listener = {"runtime": "quixotic-server", "listening": [{"port": 9000}]}
+        quiet = {"runtime": "quixotic-server", "listening": []}
+        self.assertEqual(procgraph.describe_role(listener), "server")
+        self.assertNotEqual(procgraph.describe_role(quiet), "server")
+        self.assertEqual(procgraph.describe_role({"runtime": "zsh", "listening": []}), "shell")
+
+    def test_the_graph_joins_lineage_and_sockets(self) -> None:
+        processes = [
+            {"pid": 100, "ppid": 1, "command": "npm run dev", "executable": "/usr/bin/npm"},
+            {"pid": 101, "ppid": 100, "command": "/usr/bin/node .bin/vite", "executable": "/usr/bin/node"},
+        ]
+        listening = [{"pid": 101, "local_port": 5173, "local_host": "127.0.0.1"}]
+        established = [{"pid": 101}, {"pid": 101}]
+        graph = {int(item["pid"]): item for item in procgraph.build(processes, listening, established)}
+        vite = graph[101]
+        self.assertEqual(vite["listening"][0]["port"], 5173)
+        self.assertEqual(vite["listening"][0]["scope"], "loopback")
+        self.assertEqual(vite["role"], "server")
+        self.assertEqual(vite["connections"], 2)
+        self.assertEqual(vite["parent"]["pid"], 100)
+        self.assertEqual(graph[100]["children"], [101])
+
+    def test_a_server_outranks_a_shell_that_merely_mentions_it(self) -> None:
+        server = {"runtime": "Python", "entrypoint": "http.server", "label": "Python http.server",
+                  "role": "server", "listening": [{"port": 8971}],
+                  "command": "Python -m http.server 8971"}
+        shell = {"runtime": "zsh", "entrypoint": "", "label": "zsh", "role": "shell",
+                 "listening": [], "command": "zsh -c python3 -m http.server 8971"}
+        self.assertGreater(procgraph.match_score(server, "python"),
+                           procgraph.match_score(shell, "python"))
+
+    def test_one_generic_word_does_not_match_every_server(self) -> None:
+        other = {"runtime": "rapportd", "entrypoint": "", "label": "rapportd",
+                 "role": "server", "listening": [{"port": 1}], "command": "/usr/libexec/rapportd"}
+        self.assertEqual(procgraph.match_score(other, "python http server"), 0)
+
+    def test_process_questions_route_to_the_graph(self) -> None:
+        expected = {
+            "which process is running my python http server": {"query": "python http server"},
+            "what is running on port 8080": {"port": 8080},
+            "which process is using port 3000": {"port": 3000},
+            "which process is running node": {"query": "node"},
+            "is vite running": {"query": "vite"},
+            "what servers are running on this machine": {},
+        }
+        for question, wanted in expected.items():
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertEqual((steps[0]["tool"], steps[0]["operation"]), ("process", "graph"), question)
+            for key, value in wanted.items():
+                self.assertEqual(steps[0]["inputs"].get(key), value, question)
+
+    def test_ranking_and_listing_questions_still_win(self) -> None:
+        expected = {
+            "which process is consuming most cpu": "top_cpu",
+            "tell me the top process consuming highest cpu and ram": "top_cpu",
+            "top 5 running processes as per memory": "top_memory",
+            "list running processes": "list",
+            "what processes are running": "list",
+            "tell me about pid 92894": "inspect",
+        }
+        for question, operation in expected.items():
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertEqual(steps[0]["operation"], operation, question)
+
+    def test_the_answer_names_the_pid_and_how_to_stop_it(self) -> None:
+        data = {"operation": "graph", "focus": "port 8971", "count": 1, "total_processes": 500,
+                "processes": [{"pid": 27080, "label": "Python http.server", "role": "server",
+                               "command": "Python -m http.server 8971",
+                               "listening": [{"port": 8971, "host": "::"}],
+                               "connections": 0, "children": [],
+                               "ancestry": [{"pid": 27077, "label": "zsh"}],
+                               "child_processes": []}]}
+        answer = exact_host_answer("what is running on port 8971", [{"result": {"data": data}}])
+        self.assertIn("PID 27080", answer)
+        self.assertIn("port 8971", answer)
+        self.assertIn("started by zsh (27077)", answer)
+        self.assertIn("ti do kill process 27080", answer)
+
+    def test_an_empty_port_is_answered_plainly(self) -> None:
+        data = {"operation": "graph", "focus": "port 65000", "count": 0,
+                "total_processes": 500, "processes": []}
+        answer = exact_host_answer("what is running on port 65000", [{"result": {"data": data}}])
+        self.assertIn("Nothing is listening on port 65000", answer)

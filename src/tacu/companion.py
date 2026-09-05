@@ -358,6 +358,47 @@ def _process_label(item: dict[str, Any] | None) -> str:
     return f"{name} (PID {item.get('pid')})"
 
 
+def _graph_answer(facts: dict[str, Any]) -> str | None:
+    """Name the process behind a port, a runtime or a role — and how to act on it."""
+
+    if facts.get("operation") != "graph":
+        return None
+    nodes = facts.get("processes") or []
+    focus = facts.get("focus") or "that"
+    if not nodes:
+        if str(focus).startswith("port "):
+            return f"Nothing is listening on {focus}."
+        return (f"No running process matches {focus}. "
+                f"{facts.get('total_processes') or 0} processes were examined.")
+    lines: list[str] = []
+    if len(nodes) > 1:
+        lines.append(f"{facts.get('count') or len(nodes)} processes match {focus}"
+                     + (", best first:" if len(nodes) > 1 else ":"))
+    for node in nodes[:6]:
+        ports = ", ".join(f"{entry['port']}" for entry in node.get("listening") or [])
+        where = f" on port {ports}" if ports else ""
+        lines.append(f"{node.get('label')} · PID {node.get('pid')} · {node.get('role')}{where}")
+        command = str(node.get("command") or "")
+        if command and command != node.get("label"):
+            lines.append(f"    {command[:160]}")
+        chain = node.get("ancestry") or []
+        if chain:
+            trail = " ← ".join(f"{item.get('label')} ({item.get('pid')})" for item in chain[:3])
+            lines.append(f"    started by {trail}")
+        kids = node.get("child_processes") or []
+        if kids:
+            lines.append(f"    {len(node.get('children') or [])} child process"
+                         + ("es" if len(node.get("children") or []) != 1 else "")
+                         + ": " + ", ".join(f"{item.get('label')} ({item.get('pid')})" for item in kids[:4]))
+        if node.get("connections"):
+            lines.append(f"    {node['connections']} established outbound connection"
+                         + ("s" if node["connections"] != 1 else ""))
+    leader = nodes[0]
+    if leader.get("listening"):
+        lines.append(f"To stop it: ti do kill process {leader.get('pid')}")
+    return "\n".join(lines)
+
+
 def _inspect_answer(facts: dict[str, Any]) -> str | None:
     """One named process: what it is, who owns it, and what it is running."""
 
@@ -392,6 +433,9 @@ def _inspect_answer(facts: dict[str, Any]) -> str | None:
 
 
 def _process_answer(query: str, facts: dict[str, Any]) -> str | None:
+    graphed = _graph_answer(facts)
+    if graphed:
+        return graphed
     inspected = _inspect_answer(facts)
     if inspected:
         return inspected
@@ -731,8 +775,15 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
             combined: list[dict[str, Any]] = []
             for data in process_data:
                 combined.extend(data.get("processes") or [])
+            graphed = next((data for data in process_data
+                             if data.get("operation") == "graph"), None)
             inspected = next((data for data in process_data
                               if data.get("operation") == "inspect"), None)
+            if graphed:
+                answer = _graph_answer(graphed)
+                if answer:
+                    lines.append(answer)
+                    return "\n".join(lines) if lines else None
             facts = {"kind": "processes", "processes": combined,
                      "operation": "inspect" if inspected else None,
                      "top_cpu": next((data.get("top") for data in process_data
