@@ -12,6 +12,11 @@ First public release.
 - Structured tools for workspace files, system facts, processes, networks, Git, Docker, and Ollama.
 - Large-file workflows for CSV, JSONL, XLSX, PCAP, Burp, registry-hive, SQLite, and text data.
 - Local juicy-information extraction and filtered AI questions.
+- Correlated endpoint forensics: outbound connections tied to the owning process, its
+  location and signature; exposed listeners; persistence entries; and processes holding
+  credential files open, with the checks that need root reported rather than hidden.
+- Named-host connection answers, so "am I connected to example.com" is a verdict about
+  that host rather than a ranking of destination ports.
 - Retained history, secured raw evidence, clipboard tray, backups, and workspace controls.
 - Local SearXNG-powered `ti web` research with cited answers.
 - Date, time, day, and timezone answered deterministically from the machine's own clock,

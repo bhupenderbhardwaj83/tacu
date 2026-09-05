@@ -1367,6 +1367,7 @@ def print_tool_guide() -> None:
         ("HOST SERVICE", "ti tools run service --input '{\"operation\":\"list\"}'", "launchd services on macOS; start/stop require review."),
         ("HOST PACKAGE", "ti tools run package --input '{\"operation\":\"outdated\"}'", "Homebrew list/search/info/outdated; install is gated."),
         ("HOST SECURITY", "ti tools run security --input '{\"operation\":\"gatekeeper\"}'", "Gatekeeper, codesign, quarantine, and SHA-256 without invented flags."),
+        ("HOST FORENSICS", "ti tools run forensics --input '{\"operation\":\"sweep\"}'", "Correlated endpoint check: outbound with owning process and signature, exposed listeners, persistence, credential readers. Operations: sweep, outbound, listening, persistence, secret_access."),
         ("HOST DOCKER", "ti tools run docker --input '{\"operation\":\"ps\"}'", "Running containers with name, image, and network. start/stop/rm/rmi/pull need ti do."),
         ("HOST OLLAMA", "ti tools run ollama --input '{\"operation\":\"running_models\"}'", "Loaded models and size. pull/rm/stop need ti do."),
         ("HOST GIT", "ti tools run git --input '{\"operation\":\"status\"}'", "Repo status, log, diff, branch, remote. add/commit/push need ti do."),

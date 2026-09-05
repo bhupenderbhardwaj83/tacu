@@ -158,6 +158,23 @@ def _split_hostport(value: str) -> tuple[str | None, int | None]:
     return text, None
 
 
+# lsof right-aligns PID and USER, so a wide pid or a long username overflows the
+# slice implied by the header and silently corrupts both (2758 -> 758). Every field
+# up to NAME is whitespace-delimited and lsof escapes spaces in COMMAND as \x20,
+# so anchoring on the pid is exact where fixed-width slicing is not.
+_LSOF_ROW = re.compile(
+    r"^(?P<command>\S.*?)\s+(?P<pid>\d+)\s+(?P<user>\S+)\s+(?P<fd>\S+)\s+(?P<type>\S+)"
+    r"\s+(?P<device>\S+)\s+(?P<size>\S+)\s+(?P<node>\S+)\s+(?P<name>\S.*)$"
+)
+
+
+def _lsof_fields(line: str, columns: Any) -> dict[str, str] | None:
+    match = _LSOF_ROW.match(line.rstrip())
+    if match:
+        return {key: value.strip() for key, value in match.groupdict().items()}
+    return None
+
+
 def parse_lsof_network(text: str) -> list[dict[str, Any]]:
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
@@ -168,7 +185,7 @@ def parse_lsof_network(text: str) -> list[dict[str, Any]]:
     columns = _header_columns(header)
     connections: list[dict[str, Any]] = []
     for line in lines[1:]:
-        fields = _row_fields(line, columns)
+        fields = _lsof_fields(line, columns) or _row_fields(line, columns)
         name = fields.get("name") or ""
         state_match = re.search(r"\(([^)]+)\)\s*$", name)
         state = (state_match.group(1) if state_match else "").upper() or None

@@ -190,6 +190,38 @@ ifconfig | ti ask which interface has my LAN address?
 
 ---
 
+## Endpoint forensics
+
+One question, correlated answer. TACU ties each outbound connection to the process that
+owns it, that process to its executable, and the executable to its location and signing
+authority — then reports only what more than one signal agrees on.
+
+```sh
+ti auto am i compromised                      # full sweep, correlated and scored
+ti auto is anything calling home              # outbound, with the owning process
+ti auto is something reading my ssh keys      # who holds credential files open
+ti auto what starts automatically at login    # persistence entries
+ti auto am i connected to example.com         # a verdict about that host
+```
+
+```text
+2 findings, none high severity.
+[REVIEW] com.docker (pid 92894) reading ~/.docker/config.json
+    - has docker registry credentials open
+Checked: 41 external connections, 0 exposed listeners, 37 startup entries, 2 credential readers.
+Not inspected: root-owned cron and system daemons require sudo
+```
+
+A signed binary in a normal location is not raised. An unsigned binary running from `/tmp`
+that also holds an outbound socket and a launch agent is. Checks that need root are named
+as not inspected rather than skipped silently — an answer that hides its own blind spots is
+worse than no answer.
+
+Everything runs as native tools, so `ti do` shows the same plan for review and `ti auto`
+still refuses invented shell.
+
+---
+
 ## Everyday loop
 
 ```sh

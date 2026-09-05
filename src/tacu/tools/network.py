@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ipaddress
+import socket
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from ..companion import extract_facts
@@ -70,6 +72,84 @@ def _connections(*, port: int | None = None, state: str | None = None) -> tuple[
         parsed = parse_network_table(fallback["stdout"], "netstat -an")
         raw = fallback
     return parsed, raw
+
+
+REVERSE_LOOKUP_CAP = 80
+REVERSE_LOOKUP_TIMEOUT = 1.5
+
+
+def _host_addresses(host: str) -> list[str]:
+    """Forward-resolve the asked host so its current addresses can be matched."""
+
+    try:
+        info = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return []
+    found: list[str] = []
+    for entry in info:
+        address = entry[4][0]
+        if address and address not in found:
+            found.append(address)
+    return found
+
+
+def _reverse_names(addresses: list[str]) -> dict[str, str]:
+    """Reverse-resolve remote addresses; a CDN edge usually still carries the name."""
+
+    def lookup(address: str) -> tuple[str, str]:
+        try:
+            return address, socket.gethostbyaddr(address)[0]
+        except (OSError, UnicodeError):
+            return address, ""
+
+    targets = addresses[:REVERSE_LOOKUP_CAP]
+    if not targets:
+        return {}
+    previous = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(REVERSE_LOOKUP_TIMEOUT)
+    try:
+        with ThreadPoolExecutor(max_workers=min(16, len(targets))) as pool:
+            return {address: name for address, name in pool.map(lookup, targets) if name}
+    finally:
+        socket.setdefaulttimeout(previous)
+
+
+def _host_matches(rows: list[dict[str, Any]], host: str) -> dict[str, Any]:
+    """Decide, for one named host, exactly which connections belong to it."""
+
+    wanted = host.strip().strip(".").casefold()
+    addresses = _host_addresses(wanted)
+    address_set = set(addresses)
+    remote_addresses = []
+    for row in rows:
+        remote = row.get("remote_host")
+        if remote and remote not in remote_addresses:
+            remote_addresses.append(str(remote))
+    names = _reverse_names(remote_addresses)
+
+    def belongs(row: dict[str, Any]) -> str:
+        remote = str(row.get("remote_host") or "")
+        if remote and remote in address_set:
+            return "address"
+        resolved = names.get(remote, "").casefold().strip(".")
+        if resolved and (resolved == wanted or resolved.endswith("." + wanted)):
+            return "reverse-dns"
+        text = f"{remote} {row.get('name') or ''}".casefold()
+        if wanted and wanted in text:
+            return "name"
+        return ""
+
+    matches: list[dict[str, Any]] = []
+    for row in rows:
+        reason = belongs(row)
+        if reason:
+            item = dict(row)
+            item["matched_by"] = reason
+            item["remote_name"] = names.get(str(row.get("remote_host") or ""), "")
+            matches.append(item)
+    return {"host": host, "host_addresses": addresses, "host_matches": matches,
+            "match_count": len(matches), "host_connected": bool(matches),
+            "resolved": bool(addresses)}
 
 
 def execute(context: ToolContext, *, operation: str, limit: int = 10, port: int | None = None,
@@ -193,6 +273,19 @@ def execute(context: ToolContext, *, operation: str, limit: int = 10, port: int 
     if wanted_state != "ANY":
         rows = [item for item in rows if (item.get("state") or "").upper() == wanted_state]
     ranked_ports = summarize_destination_ports(rows, state=None if wanted_state == "ANY" else wanted_state, limit=cap)
+    if host:
+        verdict = _host_matches(rows, host)
+        return {
+            "status": "success",
+            "operation": operation,
+            "state": wanted_state,
+            "port": port,
+            "connections": verdict["host_matches"][: max(cap, 20)],
+            "connection_count": verdict["match_count"],
+            "recipe": raw.get("command"),
+            "exit_code": 0,
+            **verdict,
+        }
     return {
         "status": "success" if rows or ranked_ports else "no_results",
         "operation": operation,

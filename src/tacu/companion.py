@@ -402,7 +402,40 @@ def _process_answer(query: str, facts: dict[str, Any]) -> str | None:
     return "\n".join(lines) if lines else None
 
 
+def _host_connection_answer(facts: dict[str, Any]) -> str | None:
+    """Answer "am I connected to X" with a verdict and the owning process."""
+
+    host = facts.get("host")
+    if not host or facts.get("host_connected") is None:
+        return None
+    matches = facts.get("host_matches") or []
+    if not matches:
+        detail = ("" if facts.get("resolved")
+                  else f" {host} did not resolve, so only its literal name was compared.")
+        return f"No TCP connection to {host}.{detail}"
+    owners: list[str] = []
+    for item in matches:
+        label = f"{item.get('command') or 'unknown'} (pid {item.get('pid')})"
+        if label not in owners:
+            owners.append(label)
+    plural = "s" if len(matches) != 1 else ""
+    lines = [f"Yes. {len(matches)} TCP connection{plural} to {host}, "
+             f"owned by {', '.join(owners[:6])}."]
+    for item in matches[:8]:
+        name = item.get("remote_name")
+        suffix = f" · {name}" if name and name != item.get("remote_host") else ""
+        lines.append(f"- {item.get('command')} (pid {item.get('pid')}) → "
+                     f"{item.get('remote_host')}:{item.get('remote_port')} "
+                     f"{item.get('state') or ''}".rstrip() + suffix)
+    if len(matches) > 8:
+        lines.append(f"... and {len(matches) - 8} more.")
+    return "\n".join(lines)
+
+
 def _connection_answer(query: str, facts: dict[str, Any]) -> str | None:
+    host_verdict = _host_connection_answer(facts)
+    if host_verdict:
+        return host_verdict
     ports = facts.get("destination_ports") or []
     connections = facts.get("connections") or []
     state = (facts.get("state") or "").upper()
@@ -461,6 +494,82 @@ def _connection_answer(query: str, facts: dict[str, Any]) -> str | None:
     return f"{facts.get('connection_count') or len(connections)} TCP connections observed."
 
 
+_SEVERITY_LABEL = {"high": "HIGH", "investigate": "INVESTIGATE", "review": "REVIEW"}
+
+
+def _forensic_answer(data: dict[str, Any]) -> str | None:
+    """Report what was found, why it matters, and what was not looked at."""
+
+    operation = data.get("operation")
+    if operation == "outbound":
+        external = data.get("external_count") or 0
+        concerning = data.get("concerning") or []
+        lines = [f"{external} external outbound connection"
+                 + ("s" if external != 1 else "") + "; "
+                 + (f"{len(concerning)} worth a look." if concerning else "none stand out.")]
+        for item in concerning[:8]:
+            lines.append(f"- {item.get('command')} (pid {item.get('pid')}) → "
+                         f"{item.get('remote_host')}:{item.get('remote_port')} · {item.get('executable') or 'path unknown'}")
+        if not concerning:
+            lines.append("Every connection belongs to a signed executable in a normal location.")
+        return "\n".join(lines)
+    if operation == "listening":
+        exposed = data.get("exposed") or []
+        lines = [f"{data.get('listening_count') or 0} listening socket"
+                 + ("s" if (data.get('listening_count') or 0) != 1 else "")
+                 + f"; {len(exposed)} reachable beyond loopback."]
+        for item in exposed[:8]:
+            lines.append(f"- {item.get('command')} (pid {item.get('pid')}) on "
+                         f"{item.get('local_host')}:{item.get('local_port')}")
+        if not exposed:
+            lines.append("Everything listening is bound to loopback, so nothing is reachable from the network.")
+        return "\n".join(lines)
+    if operation == "persistence":
+        flagged = data.get("flagged") or []
+        lines = [f"{data.get('entry_count') or 0} things start automatically; "
+                 + (f"{len(flagged)} worth a look." if flagged else "none look unusual.")]
+        for item in flagged[:8]:
+            lines.append(f"- {item.get('kind')}: {item.get('name')}")
+        return "\n".join(lines)
+    if operation == "secret_access":
+        if data.get("supported") is False:
+            return f"Could not check credential access: {data.get('reason')}"
+        holders = data.get("holders") or []
+        if not holders:
+            return ("No process is currently holding your credential files open "
+                    f"({len(data.get('checked_paths') or [])} checked).")
+        lines = [f"{len(holders)} process"
+                 + ("es" if len(holders) != 1 else "") + " currently hold credential files open:"]
+        for item in holders[:10]:
+            signature = item.get("signature") or {}
+            trust = signature.get("authority") or signature.get("package") or (
+                "unsigned" if signature.get("signed") is False else "signature not checked")
+            lines.append(f"- {item.get('process')} (pid {item.get('pid')}) → {item.get('secret')} · {trust}")
+        return "\n".join(lines)
+    if operation != "sweep":
+        return None
+    findings = data.get("findings") or []
+    outbound = data.get("outbound") or {}
+    listening = data.get("listening") or {}
+    if not findings:
+        lines = ["Nothing correlated as suspicious."]
+    else:
+        high = data.get("high_count") or 0
+        lines = [f"{len(findings)} finding" + ("s" if len(findings) != 1 else "")
+                 + (f", {high} high severity." if high else ", none high severity.")]
+        for item in findings[:10]:
+            lines.append(f"[{_SEVERITY_LABEL.get(item['severity'], item['severity'].upper())}] {item['what']}")
+            for reason in item.get("why", [])[:3]:
+                lines.append(f"    - {reason}")
+    lines.append(f"Checked: {outbound.get('external_count') or 0} external connections, "
+                 f"{listening.get('exposed_count') or 0} exposed listeners, "
+                 f"{(data.get('persistence') or {}).get('entry_count') or 0} startup entries, "
+                 f"{(data.get('secret_access') or {}).get('holder_count') or 0} credential readers.")
+    for note in data.get("not_inspected") or []:
+        lines.append(f"Not inspected: {note}")
+    return "\n".join(lines)
+
+
 def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | None:
     """Answer a host-ops intent from native tool results without a model call."""
 
@@ -483,6 +592,13 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
         result = item.get("result") or {}
         data = result.get("data") or {}
         tool = result.get("tool")
+        if data.get("operation") in {"sweep", "outbound", "listening", "persistence", "secret_access"} and (
+                data.get("findings") is not None or data.get("holders") is not None
+                or data.get("entries") is not None or data.get("concerning") is not None
+                or data.get("exposed") is not None):
+            forensic = _forensic_answer(data)
+            if forensic:
+                return forensic
         if data.get("processes") is not None or data.get("open_files") is not None:
             process_data.append(data)
         if (data.get("destination_ports") is not None or data.get("connections") is not None
@@ -601,6 +717,11 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
                 "connection_count": data.get("connection_count") or len(data.get("connections") or []),
                 "destination_ports": data.get("destination_ports") or [],
                 "top_destination_port": data.get("top_destination_port"),
+                # Carry the named-host verdict so "am I connected to X" stays a yes/no.
+                "host": data.get("host"),
+                "host_connected": data.get("host_connected"),
+                "host_matches": data.get("host_matches"),
+                "resolved": data.get("resolved"),
             })
             if answer:
                 lines.append(answer)

@@ -293,11 +293,50 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("find process", "which process named", "process called"),
                ("process", "pid"),
                "Find processes by name"),
+    Capability("forensics", "sweep",
+               ("am i compromised", "is my machine compromised", "security check", "endpoint check",
+                "forensic check", "forensics", "check my computer for", "health check for malware",
+                "is my computer hacked", "am i hacked", "scan my machine", "compromise check",
+                "check for malware", "check for backdoor", "security sweep", "is this machine safe",
+                "check my machine", "check this machine", "check my computer", "malware",
+                "scan for malware", "any malware", "infected", "is my laptop safe"),
+               ("compromised", "hacked", "malware", "backdoor", "forensic", "compromise"),
+               "Correlated endpoint compromise sweep: outbound, listeners, persistence, secrets"),
+    Capability("forensics", "outbound",
+               ("calling home", "call home", "callback home", "phoning home", "beaconing",
+                "suspicious connection", "suspicious connections", "unexpected connection",
+                "command and control", "exfiltrating", "exfiltration", "data leaving"),
+               ("beacon", "c2", "callback", "exfil", "suspicious"),
+               "Outbound connections correlated with the owning process and its signature"),
+    Capability("forensics", "secret_access",
+               ("stealing my password", "stealing passwords", "reading my ssh", "stealing secrets",
+                "stealing credentials", "reading my credentials", "accessing my keys",
+                "process reading secrets", "who is reading my aws", "credential theft",
+                "stealing my tokens", "reading my private key", "stealing my aws",
+                "stealing my credentials", "steal my credentials", "process stealing",
+                "stealing my git", "stealing my cloud", "who is reading my", "reading my keys",
+                "stealing my", "steal my", "stealing the",
+                "leaking my credentials", "harvesting credentials"),
+               ("credential", "credentials", "secrets", "password", "passwords", "token", "keys"),
+               "Processes currently holding credential files open"),
+    Capability("forensics", "persistence",
+               ("persistence", "startup items", "launch agents", "launch daemons", "auto start",
+                "starts automatically", "what runs at login", "what starts on boot", "startup programs"),
+               ("persistence", "startup", "autostart", "launchd", "systemd"),
+               "Entries configured to start automatically"),
+    Capability("forensics", "listening",
+               ("exposed port", "exposed ports", "listening to the network", "reachable from outside",
+                "backdoor listening", "who can reach my machine"),
+               ("exposed", "reachable"),
+               "Listening sockets with the owning process, separating loopback from exposed"),
     Capability("network", "connections",
                ("tcp connection", "established connection", "connections established", "outbound connection",
                 "destination port", "destination ports", "top destinations", "foreign address",
                 "active connections", "using lsof", "established on tcp", "destinations have connection",
-                "tcp 443 connection", "connections in other state", "not established"),
+                "tcp 443 connection", "connections in other state", "not established",
+                "connected to", "connection to", "connection with", "connecting to",
+                "am i connected", "talking to", "communicating with", "reaching out to",
+                "outbound to", "traffic to", "connections to"),
                ("tcp", "udp", "port", "connection", "outbound", "destination", "established", "lsof"),
                "List TCP connections and rank destination ports"),
     Capability("network", "listening_ports",
@@ -1444,13 +1483,19 @@ def _entity_hit(text: str, entity: str) -> bool:
 def score_capability(intent: str, capability: Capability) -> int:
     text = normalize_intent_text(intent)
     score = 0
+    phrase_hit = False
     for phrase in capability.phrases:
         if phrase in text:
             score += 50
+            phrase_hit = True
     hits = sum(1 for entity in capability.entities if _entity_hit(text, entity))
     if hits:
         score += 12 * hits
     domain = intent_host_domain(intent)
+    if capability.tool == "forensics" and phrase_hit:
+        # A forensic question names the thing at risk — git, docker, aws credentials —
+        # without being a question about that tool. Its own phrasing decides it.
+        return score
     if domain:
         if capability.tool == domain:
             score += 15
@@ -1790,7 +1835,9 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
         domain = intent_host_domain(intent)
         if domain and capability.tool in _CODING_TOOLS:
             continue
-        if domain and capability.tool != domain:
+        # Forensics is deliberately cross-domain: "is something stealing my git
+        # credentials" names git but is not a question for the git tool.
+        if domain and capability.tool != domain and capability.tool != "forensics":
             continue
         if capability.operation == "serve":
             continue
@@ -1824,6 +1871,9 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
             inputs["port"] = port
         if capability.operation == "connections":
             inputs["state"] = connection_state_from_intent(intent)
+            # A named host turns a ranking into a yes/no question about that host.
+            if host:
+                inputs["host"] = host
         if capability.tool == "application" and app and capability.operation != "list":
             inputs["name"] = app
         if capability.tool == "application" and capability.operation != "list" and not inputs.get("name"):

