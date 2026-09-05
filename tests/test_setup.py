@@ -1044,19 +1044,34 @@ class ToolDiscoverabilityTests(unittest.TestCase):
         for spec in specs():
             self.assertIn(spec.name, text, f"{spec.name} is registered but invisible in ti tools --help")
 
-    def test_the_help_states_the_real_tool_count(self) -> None:
+    def test_every_tool_entry_follows_the_house_format(self) -> None:
+        """name, then a shape, then a runnable example, then what it is for."""
+
         from tacu.tools import specs
 
-        self.assertIn(f"{len(specs())} native tools", self._help_text())
+        text = self._help_text()
+        for spec in specs():
+            line = next((row for row in text.splitlines()
+                         if row.startswith(f"  {spec.name} ") or row.strip() == spec.name), "")
+            self.assertTrue(line, f"{spec.name} has no entry line")
+            self.assertIn("|  e.g. ", line, f"{spec.name} shows no example")
+            shape = line.split("|  e.g. ")[0].replace(f"  {spec.name}", "", 1).strip()
+            self.assertTrue(shape, f"{spec.name} shows no syntax")
+
+    def test_operations_in_the_shape_come_from_the_contract(self) -> None:
+        text = self._help_text()
+        self.assertIn("operation: sweep|outbound|listening|persistence", text)
+        self.assertIn("path*", text, "required fields should be marked")
 
     def test_an_ungrouped_tool_still_surfaces(self) -> None:
         from tacu import helptext
 
-        groups = tuple(item for item in helptext._TOOL_GROUPS if item[0] != "HOST & SYSTEM")
+        groups = tuple(item for item in helptext._TOOL_GROUPS
+                       if "process" not in item[1])
         with patch.object(helptext, "_TOOL_GROUPS", groups):
             text = self._help_text()
-        # process is no longer in any group, so it must appear under MORE.
-        self.assertIn("MORE", text)
+        # process belongs to no group now, so it must still print under OTHER TOOLS.
+        self.assertIn("OTHER TOOLS", text)
         self.assertIn("process", text)
 
     def test_the_help_points_at_the_full_listing(self) -> None:

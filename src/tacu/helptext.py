@@ -65,7 +65,8 @@ def _terminal_width() -> int:
     return shutil.get_terminal_size(fallback=(120, 24)).columns
 
 
-def _entry(name: str, syntax: str, example: str, does: str, *, ai: bool = False) -> None:
+def _entry(name: str, syntax: str, example: str, does: str, *, ai: bool = False,
+           width: int | None = None) -> None:
     """Uniform help entry used by every topic.
 
     Line 1 pairs the shape with a runnable example:
@@ -73,7 +74,7 @@ def _entry(name: str, syntax: str, example: str, does: str, *, ai: bool = False)
     Line 2 explains what it does and when to reach for it, wrapped to the terminal.
     """
 
-    left = f"{_ENTRY_INDENT}{name.ljust(_ENTRY_WIDTH)} "
+    left = f"{_ENTRY_INDENT}{name.ljust(width or _ENTRY_WIDTH)} "
     lead = f"{_AI_SPARKLE} " if ai else ""
     shape = f"{lead}{syntax}"
     # The sparkle renders two columns wide but counts as one character.
@@ -96,11 +97,13 @@ def _entry(name: str, syntax: str, example: str, does: str, *, ai: bool = False)
             print(paint(f"{indent}{line}", PALETTE.muted))
 
 
-def _legend() -> None:
-    print(paint(
-        "Shape: UPPERCASE = you supply it · [brackets] = optional · a|b = pick one",
-        PALETTE.muted,
-    ))
+def _legend(*, fields: bool = False) -> None:
+    """The shape key. `fields` adds the marker only where contract inputs are shown."""
+
+    parts = ["UPPERCASE = you supply it", "[brackets] = optional", "a|b = pick one"]
+    if fields:
+        parts.append("field* = required")
+    print(paint("Shape: " + " · ".join(parts), PALETTE.muted))
 
 
 def _more(*topics: str) -> None:
@@ -304,56 +307,115 @@ def print_copy_help() -> None:
     _more("clip", "review", "syntax")
 
 
-# The file commands above already have friendly names, so they are not repeated below.
-_FRIENDLY_TOOLS = ("repo_map", "search_code", "read_file", "write_file", "edit_file")
-# Grouping is presentational only. Any tool missing from it still appears under MORE,
-# so adding a tool can never make it invisible here.
-_TOOL_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("HOST & SYSTEM", "facts about this machine",
+# Grouping and examples are presentational. Syntax and description come from each
+# tool's own contract, and anything ungrouped still prints, so adding a tool cannot
+# make it invisible or make this text wrong.
+_TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("HOST TOOLS — facts about this machine",
      ("process", "network", "system", "application", "service", "package", "ollama")),
-    ("SECURITY & FORENSICS", "is this machine clean",
+    ("SECURITY TOOLS — is this machine clean",
      ("forensics", "security")),
-    ("CODE & CONTAINERS", "repos, images, tests",
+    ("CODE & CONTAINER TOOLS",
      ("git", "docker", "run_tests", "diagnostics", "inspect_symbol")),
-    ("WORKSPACE", "files, shell, task state",
+    ("WORKSPACE TOOLS",
      ("filesystem", "shell", "task_state")),
-    ("FILE CONTRACTS", "the tools behind the commands above",
+    ("FILE CONTRACTS — behind the file commands above",
      ("repo_map", "search_code", "read_file", "write_file", "edit_file")),
 )
 
+# How you would actually reach each tool in words. A tool with no example still
+# prints; it just shows the contract call instead.
+_TOOL_EXAMPLES = {
+    "process": "ti auto which process is consuming most CPU",
+    "network": "ti auto am i connected to github.com",
+    "system": "ti auto what is current date and time",
+    "application": "ti auto is Docker Desktop installed",
+    "service": "ti auto which services are running",
+    "package": "ti auto which brew packages are outdated",
+    "ollama": "ti auto list active local AI models",
+    "forensics": "ti auto am i compromised",
+    "security": "ti auto is this binary signed",
+    "git": "ti auto summarize uncommitted git changes",
+    "docker": "ti auto list docker containers",
+    "run_tests": "ti auto run the tests",
+    "diagnostics": "ti auto check this file for syntax errors",
+    "inspect_symbol": "ti auto where is the function main defined",
+    "filesystem": "ti auto find all images on Desktop",
+    "shell": "ti do run the build script",
+    "task_state": "ti tools run task_state --input '{\"operation\":\"show\"}'",
+    "repo_map": "ti tools map . --depth 3",
+    "search_code": "ti tools search TODO . --glob \"*.py\"",
+    "read_file": "ti tools read README.md --start 1 --end 40",
+    "write_file": "ti tools write hello.py --content \"print(1)\"",
+    "edit_file": "ti tools edit app.py --old \"foo\" --new \"bar\"",
+}
+
+
+# The widest tool name is longer than the shared column, so this section sets its own.
+_TOOL_NAME_WIDTH = 15
+
+
+def _tool_shape(spec: Any) -> str:
+    """The operations a tool accepts, read from its own input contract."""
+
+    properties = (spec.input_schema or {}).get("properties") or {}
+    operations = (properties.get("operation") or {}).get("enum") or []
+    if not operations:
+        # No operation enum: show the fields it takes, required ones first.
+        required = list((spec.input_schema or {}).get("required") or ())
+        optional = [name for name in properties if name not in required]
+        fields = [f"{name}*" for name in required] + optional
+        return " ".join(fields[:4]) + (" …" if len(fields) > 4 else "") if fields else "no inputs"
+    shown = list(operations[:4])
+    if len(operations) > len(shown):
+        shown.append("…")
+    return f"operation: {'|'.join(shown)}"
+
+
+def _tool_summary(spec: Any) -> str:
+    """First sentence of the contract description, plus how to ask in words."""
+
+    text = " ".join((spec.description or "").split())
+    first, _, _rest = text.partition(". ")
+    summary = (first or text).rstrip(".")
+    example = _TOOL_EXAMPLES.get(spec.name, "")
+    if example.startswith("ti auto") or example.startswith("ti do"):
+        return f"{summary}. Ask in words, or call the contract with ti tools run {spec.name}."
+    return f"{summary}. Call it with ti tools run {spec.name} --input 'JSON'."
+
 
 def _print_native_tool_groups() -> None:
-    """Render the native tools from the registry, so this can never go stale."""
-
     from .tools import specs
 
+    global _TOOL_NAME_WIDTH
+
     available = {spec.name: spec for spec in specs()}
-    shown: set[str] = set()
-    print(paint(f"HOST TOOLS ({len(available)} native tools · ti auto picks from these)",
-                PALETTE.violet + PALETTE.bold))
-    for title, gist, names in _TOOL_GROUPS:
+    grouped: set[str] = set()
+    sections = list(_TOOL_GROUPS)
+    leftover = [name for name in available if not any(name in names for _, names in sections)]
+    if leftover:
+        sections.append(("OTHER TOOLS", tuple(sorted(leftover))))
+    for title, names in sections:
         present = [name for name in names if name in available]
         if not present:
             continue
-        shown.update(present)
-        print(paint(f"  {title:<22}", PALETTE.accent) + paint(gist, PALETTE.muted))
-        print(paint(f"    {'  '.join(present)}", PALETTE.reset))
-    remaining = sorted(set(available) - shown)
-    if remaining:
-        print(paint(f"  {'MORE':<22}", PALETTE.accent) + paint("newer tools", PALETTE.muted))
-        print(paint(f"    {'  '.join(remaining)}", PALETTE.reset))
-    print(paint("  Ask in words — ti auto which process is consuming most CPU — or call one "
-                "directly:", PALETTE.muted))
-    print(paint("    ti tools describe forensics    ti tools list    ti help forensics",
-                PALETTE.muted))
+        grouped.update(present)
+        print()
+        print(paint(title, PALETTE.violet + PALETTE.bold))
+        for name in present:
+            spec = available[name]
+            _entry(name, _tool_shape(spec),
+                   _TOOL_EXAMPLES.get(name, f"ti tools describe {name}"),
+                   _tool_summary(spec), width=_TOOL_NAME_WIDTH)
 
 
 def print_tools_help() -> None:
     print(_heading("ti tools — workspace files, host facts, and forensics"))
-    print(paint("WHAT: Map, find, search, read, write, and edit files inside the TACU workspace guard.", PALETTE.text))
-    print(paint("WHEN: You want structured file work without inventing shell pipelines.", PALETTE.text))
+    print(paint("WHAT: The file commands, plus every native tool contract ti auto picks from.", PALETTE.text))
+    print(paint("WHEN: You want structured file work, a host fact, or a compromise check "
+                "without inventing shell pipelines.", PALETTE.text))
     print()
-    _legend()
+    _legend(fields=True)
     print()
     print(paint("FILE COMMANDS", PALETTE.violet + PALETTE.bold))
     _entry("map", "ti tools map [WHERE] [--depth N] [--symbols]", "ti tools map . --depth 3",
@@ -385,7 +447,6 @@ def print_tools_help() -> None:
     print(paint("  Text matching is literal; add --regex for patterns. Case is ignored unless --case-sensitive.",
                 PALETTE.muted))
     print(paint("  Add --json to map, find, search, read, write, or edit when a script consumes the output.", PALETTE.muted))
-    print()
     _print_native_tool_groups()
     print()
     print(paint("DISCOVERY", PALETTE.violet + PALETTE.bold))

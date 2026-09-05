@@ -2,6 +2,15 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.2.2] - 2026-09-05
+
+### Changed
+
+- Native tools in `ti tools --help` now follow the same entry format as every other
+  help section: name, shape, runnable example, then what it is for. The shape and the
+  description come from each tool's own contract, so they cannot drift from it, and a
+  test asserts every registered tool has all four parts.
+
 ## [0.2.1] - 2026-09-05
 
 ### Fixed
@@ -60,6 +69,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.2.2]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.2
 [0.2.1]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.1
 [0.2.0]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.0
 [0.1.0]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.1.0
