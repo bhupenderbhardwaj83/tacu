@@ -40,6 +40,12 @@ def execute(context: ToolContext, *, operation: str, limit: int = 10, pid: int |
     from .contracts import require_approval
 
     cap = max(1, min(int(limit or 10), 50))
+    if operation == "find" and not (query or "").strip() and pid is None:
+        raise ToolFailure(
+            "find needs a name to look for, as query. To look one up by number, "
+            "use operation inspect with pid.", code="invalid_arguments")
+    if operation in {"inspect", "open_files", "tree"} and pid is None:
+        raise ToolFailure(f"{operation} requires pid.", code="invalid_arguments")
     if operation == "kill":
         require_approval(context, "process.kill")
         if pid is None:
@@ -97,8 +103,9 @@ def execute(context: ToolContext, *, operation: str, limit: int = 10, pid: int |
                 "exit_code": 0}
     if operation == "find":
         needle = (query or "").strip().casefold()
-        if not needle:
-            raise ToolFailure("find requires query.", code="invalid_arguments")
+        if not needle and pid is not None:
+            # A caller that knows the pid but reached for find still means "this one".
+            needle = str(pid)
         matches = [item for item in processes
                    if needle in (item.get("command") or "").casefold()
                    or needle in (item.get("executable") or "").casefold()

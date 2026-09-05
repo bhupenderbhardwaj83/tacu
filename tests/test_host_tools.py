@@ -1068,3 +1068,87 @@ class CertificateCoverageTests(unittest.TestCase):
     def test_ordering_keeps_every_candidate(self) -> None:
         addresses = ["1.1.1.1", "45.60.12.5", "2606:4700::1111"]
         self.assertCountEqual(tacu_network._probe_order(addresses, ["45.60.12.77"]), addresses)
+
+
+class ProcessLookupByIdTests(unittest.TestCase):
+    """Naming a PID must reach the process, whatever words surround the number."""
+
+    PHRASINGS = (
+        "tell me all about process with id 92894",
+        "tell me about pid 92894",
+        "details of process 92894",
+        "inspect process 92894",
+        "what is process 92894",
+        "who owns pid 92894",
+    )
+
+    def test_a_pid_is_read_from_every_natural_phrasing(self) -> None:
+        from tacu.routing import _pid_from_intent
+
+        for question in self.PHRASINGS:
+            self.assertEqual(_pid_from_intent(question), 92894, question)
+
+    def test_counts_and_rankings_are_not_mistaken_for_a_pid(self) -> None:
+        from tacu.routing import _pid_from_intent
+
+        for question in ("top 5 processes by memory", "which process is consuming most cpu",
+                         "list running processes", "top 3 running processes"):
+            self.assertIsNone(_pid_from_intent(question), question)
+
+    def test_naming_a_pid_routes_to_inspect(self) -> None:
+        for question in self.PHRASINGS:
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertEqual((steps[0]["tool"], steps[0]["operation"]), ("process", "inspect"), question)
+            self.assertEqual(steps[0]["inputs"].get("pid"), 92894, question)
+
+    def test_ranking_and_listing_questions_are_unaffected(self) -> None:
+        expected = {
+            "which process is consuming most cpu": "top_cpu",
+            "top 5 running processes as per memory": "top_memory",
+            "list running processes": "list",
+            "what processes are running": "list",
+        }
+        for question, operation in expected.items():
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertEqual((steps[0]["tool"], steps[0]["operation"]), ("process", operation), question)
+
+    def test_find_accepts_a_pid_instead_of_dead_ending(self) -> None:
+        rows = [{"pid": 92894, "command": "/Applications/Docker.app/com.docker.backend",
+                 "executable": "/Applications/Docker.app/com.docker.backend", "user": "me"}]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch("tacu.tools.process.run_argv",
+                   return_value={"exit_code": 0, "stdout": "", "stderr": "", "command": ["ps"]}), \
+             patch("tacu.tools.process.parse_ps", return_value=rows):
+            context = ToolContext(workspace=Path(directory), state_dir=Path(directory))
+            result = invoke("process", {"operation": "find", "pid": 92894}, context)
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.data["count"], 1)
+
+    def test_find_without_a_name_or_pid_says_what_to_do(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = ToolContext(workspace=Path(directory), state_dir=Path(directory))
+            result = invoke("process", {"operation": "find"}, context)
+        self.assertFalse(result.ok)
+        self.assertIn("inspect", result.error["message"])
+
+    def test_inspect_answers_with_the_process_not_a_ranking(self) -> None:
+        data = {"operation": "inspect", "processes": [
+            {"pid": 92894, "ppid": 92874, "user": "me", "cpu_percent": 0.4,
+             "memory_percent": 1.4, "rss_bytes": 549535744,
+             "command": "/Applications/Docker.app/com.docker.backend services",
+             "executable": "/Applications/Docker.app/com.docker.backend"}], "count": 1}
+        answer = exact_host_answer("tell me all about process with id 92894",
+                                   [{"result": {"data": data}}])
+        self.assertIn("PID 92894", answer)
+        self.assertIn("Owned by me", answer)
+        self.assertIn("92874", answer)
+        self.assertIn("0.4% CPU", answer)
+        self.assertNotIn("Highest CPU", answer)
+
+    def test_an_unknown_pid_is_reported_plainly(self) -> None:
+        answer = exact_host_answer("tell me about pid 99999",
+                                   [{"result": {"data": {"operation": "inspect",
+                                                         "processes": [], "count": 0}}}])
+        self.assertIn("No process is running with that PID", answer)

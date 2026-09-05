@@ -666,11 +666,18 @@ CAPABILITIES: tuple[Capability, ...] = (
                "Show Docker container resource stats"),
     # High-value Mac ops that exist in tools but were missing from the planner catalog.
     Capability("process", "list",
-               ("list processes", "all processes", "ps aux", "show processes"),
+               ("list processes", "all processes", "ps aux", "show processes",
+                "list running processes", "running processes", "list all process",
+                "show me processes", "what processes are running"),
                ("process", "pid"),
                "List processes"),
     Capability("process", "inspect",
-               ("inspect process", "process details", "process info", "tell me about pid"),
+               ("inspect process", "process details", "process info", "tell me about pid",
+                "about process with id", "process with id", "process with pid", "about pid",
+                "tell me about process", "all about process", "details of process",
+                "what is pid", "which process is", "info on pid", "who owns pid",
+                "what is this process", "identify process", "what is process",
+                "which process has", "process running with"),
                ("process", "pid"),
                "Inspect one process by PID"),
     Capability("network", "primary_ip",
@@ -875,10 +882,23 @@ def limit_from_intent(intent: str, default: int = 10) -> int:
     return default
 
 
+# "pid 92894", "process with id 92894", "process 92894", "id 92894". A bare number is
+# not enough: "top 5 processes" must not read 5 as a pid.
+_PID_PATTERNS = (
+    r"\bpid\s*[:=#]?\s*(\d{1,7})\b",
+    r"\bprocess(?:es)?\s+(?:with\s+)?(?:the\s+)?(?:id|pid|number)\s*[:=#]?\s*(\d{1,7})\b",
+    r"\bprocess(?:es)?\s+[#]?(\d{2,7})\b",
+    r"\b(?:id|identifier)\s*[:=#]?\s*(\d{3,7})\b",
+)
+
+
 def _pid_from_intent(intent: str) -> int | None:
-    match = re.search(r"\bpid\s+(\d{1,7})\b", intent, flags=re.I)
-    if match:
-        return int(match.group(1))
+    for pattern in _PID_PATTERNS:
+        match = re.search(pattern, intent, flags=re.I)
+        if match:
+            value = int(match.group(1))
+            if 1 <= value <= 4_194_304:
+                return value
     return None
 
 
@@ -1525,10 +1545,12 @@ def score_capability(intent: str, capability: Capability) -> int:
     if capability.operation == "list" and capability.tool == "process":
         if any(word in text for word in ("top", "cpu", "memory", "ram", "rss", "processing")):
             score -= 60
-        elif "list" not in text and "all process" not in text:
+        elif not phrase_hit and "list" not in text and "all process" not in text:
+            # A curated phrase already decided this is a listing question.
             score -= 40
     if capability.operation == "inspect" and capability.tool == "process":
-        if not re.search(r"\bpid\b|\binspect\b", text):
+        # Inspecting one process only makes sense when the question names one.
+        if _pid_from_intent(intent) is None:
             score -= 50
         if any(word in text for word in ("top", "cpu", "memory", "ram", "highest")):
             score -= 40

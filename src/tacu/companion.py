@@ -358,7 +358,43 @@ def _process_label(item: dict[str, Any] | None) -> str:
     return f"{name} (PID {item.get('pid')})"
 
 
+def _inspect_answer(facts: dict[str, Any]) -> str | None:
+    """One named process: what it is, who owns it, and what it is running."""
+
+    if facts.get("operation") != "inspect":
+        return None
+    processes = facts.get("processes") or []
+    if not processes:
+        return "No process is running with that PID."
+    item = processes[0]
+    lines = [f"{item.get('command') or 'unknown'} · PID {item.get('pid')}"]
+    owner = item.get("user")
+    parent = item.get("ppid")
+    if owner or parent is not None:
+        detail = f"Owned by {owner}" if owner else "Owner unknown"
+        lines.append(f"{detail}{f', started by PID {parent}' if parent is not None else ''}.")
+    cpu = item.get("cpu_percent")
+    memory = item.get("memory_percent")
+    rss = item.get("rss_bytes")
+    usage = []
+    if isinstance(cpu, (int, float)):
+        usage.append(f"{cpu:.1f}% CPU")
+    if isinstance(memory, (int, float)):
+        readable = f" ({rss / 1024 ** 3:.1f} GB)" if isinstance(rss, int) and rss >= 1024 ** 3 else (
+            f" ({rss / 1024 ** 2:.0f} MB)" if isinstance(rss, int) and rss else "")
+        usage.append(f"{memory:.1f}% memory{readable}")
+    if usage:
+        lines.append("Using " + " and ".join(usage) + ".")
+    executable = item.get("executable")
+    if executable and executable != item.get("command"):
+        lines.append(f"Executable: {executable}")
+    return "\n".join(lines)
+
+
 def _process_answer(query: str, facts: dict[str, Any]) -> str | None:
+    inspected = _inspect_answer(facts)
+    if inspected:
+        return inspected
     processes = facts.get("processes") or []
     if not processes:
         return "No processes were returned by the native process recipe."
@@ -695,7 +731,10 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
             combined: list[dict[str, Any]] = []
             for data in process_data:
                 combined.extend(data.get("processes") or [])
+            inspected = next((data for data in process_data
+                              if data.get("operation") == "inspect"), None)
             facts = {"kind": "processes", "processes": combined,
+                     "operation": "inspect" if inspected else None,
                      "top_cpu": next((data.get("top") for data in process_data
                                       if data.get("operation") == "top_cpu" and data.get("top")), None),
                      "top_memory": next((data.get("top") for data in process_data

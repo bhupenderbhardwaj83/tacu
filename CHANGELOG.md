@@ -2,6 +2,18 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.1] - 2026-09-05
+
+### Fixed
+
+- A question naming a process by number failed with "find requires query". PIDs are now
+  read from the wording people actually use ("process with id 92894", "details of process
+  92932"), and such a question routes to `inspect`, which takes a PID. `find` also accepts
+  a PID rather than dead-ending, and its error now says which operation to use.
+- Inspecting one process answered with the top-CPU ranking. It now reports that process:
+  command, PID, owner, parent, CPU, memory, and executable.
+- "list running processes" and "what processes are running" matched nothing.
+
 ## [0.3.0] - 2026-09-05
 
 ### Added
@@ -82,6 +94,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.3.1]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.1
 [0.3.0]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.0
 [0.2.2]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.2
 [0.2.1]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.2.1
