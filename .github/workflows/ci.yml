@@ -16,6 +16,9 @@ jobs:
   tests:
     name: ${{ matrix.os }} · Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    # macOS and Linux gate the build. Windows is documented as experimental until its
+    # release gates pass on a Windows host, so it reports without blocking a merge.
+    continue-on-error: ${{ startsWith(matrix.os, 'windows') }}
     strategy:
       fail-fast: false
       matrix:

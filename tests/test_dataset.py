@@ -145,8 +145,10 @@ class LoadTests(unittest.TestCase):
             home = Path(directory) / "home"
             info = dataset.load_csv(_csv(Path(directory)), home=home)
             store = dataset.datasets_home(home) / f"{info.id}.db"
-            self.assertEqual(store.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(dataset.datasets_home(home).stat().st_mode & 0o777, 0o700)
+            if sys.platform != "win32":
+                # Windows has no POSIX mode bits; only the read-only flag survives.
+                self.assertEqual(store.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(dataset.datasets_home(home).stat().st_mode & 0o777, 0o700)
 
 
 class QueryGuardTests(unittest.TestCase):

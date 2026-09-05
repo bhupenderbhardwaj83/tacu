@@ -2,6 +2,19 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.3] - 2026-09-06
+
+### Fixed
+
+- A dataset test asserted POSIX permission bits, which Windows does not have. Guarded the
+  same way the other permission assertion already was.
+
+### Changed
+
+- CI gates on macOS and Linux and reports Windows without blocking, matching the support
+  level the README states. Windows has failed since the first release for reasons rooted
+  in POSIX assumptions across the suite; that work is tracked separately.
+
 ## [0.3.2] - 2026-09-06
 
 ### Added
@@ -111,6 +124,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.3.3]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.3
 [0.3.2]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.2
 [0.3.1]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.1
 [0.3.0]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.0
