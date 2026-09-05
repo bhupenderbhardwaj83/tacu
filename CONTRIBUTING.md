@@ -34,6 +34,18 @@ On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
 - Do not add mandatory runtime dependencies without discussing the architecture first.
 - Confirm `python -m unittest discover -s tests` passes before requesting review.
 
+## Versioning
+
+TACU follows [semantic versioning](https://semver.org/). While the major version is `0`:
+
+- **patch** (`0.2.0` → `0.2.1`) — bug fixes and wording, no new capability.
+- **minor** (`0.2.0` → `0.3.0`) — a new tool, capability, command, or changed behaviour.
+- **major** stays `0` until the tool contracts and CLI surface are stable.
+
+The version lives in exactly one place, `src/tacu/__init__.py`. `pyproject.toml` declares it
+dynamic and the build backend reads it from there, so a release cannot half-happen. Bump it in
+the same commit as the change it describes and add the matching `CHANGELOG.md` entry.
+
 ## Commit messages
 
 Use a short imperative subject that describes the outcome, for example:

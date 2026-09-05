@@ -17,6 +17,7 @@ from tacu.host_parsers import parse_lsof_network, parse_netstat, parse_ps, summa
 from tacu.tools import forensics, network as tacu_network
 from tacu.routing import native_steps_for_intent
 from tacu.tools import ToolContext, invoke, specs
+from tacu.tools.contracts import ToolFailure
 
 
 PS_BSD = """  PID  PPID USER             %CPU %MEM    RSS COMMAND
@@ -923,3 +924,130 @@ class ForensicCorrelationTests(unittest.TestCase):
             steps = native_steps_for_intent(question)
             self.assertTrue(steps, question)
             self.assertEqual((steps[0]["tool"], steps[0]["operation"]), expected, question)
+
+
+class CdnFrontedDomainTests(unittest.TestCase):
+    """Behind a CDN or WAF neither the address nor its PTR names the site."""
+
+    WAF_ROWS = [
+        {"command": "Chrome", "pid": 2758, "user": "me", "protocol": "tcp", "state": "ESTABLISHED",
+         "local_host": "192.168.1.3", "local_port": 65376,
+         "remote_host": "45.60.102.77", "remote_port": 443, "name": "->45.60.102.77:443"},
+    ]
+
+    def test_certificate_attributes_a_connection_dns_no_longer_points_at(self) -> None:
+        # The edge rotates, so the live socket is on an address this lookup misses.
+        with patch("tacu.tools.network._host_addresses", return_value=["45.60.12.77"]), \
+             patch("tacu.tools.network._reverse_names", return_value={}), \
+             patch("tacu.tools.network._certificate_map",
+                   return_value={"45.60.102.77": ["www.ab-inbev.com", "ab-inbev.com"]}):
+            verdict = tacu_network._host_matches(self.WAF_ROWS, "ab-inbev.com")
+        self.assertTrue(verdict["host_connected"])
+        self.assertEqual(verdict["host_matches"][0]["matched_by"], "tls-certificate")
+        self.assertIn("ab-inbev.com", verdict["host_matches"][0]["certificate_names"])
+
+    def test_a_shared_edge_serving_other_names_is_not_a_match(self) -> None:
+        with patch("tacu.tools.network._host_addresses", return_value=["203.0.113.1"]), \
+             patch("tacu.tools.network._reverse_names", return_value={}), \
+             patch("tacu.tools.network._certificate_map",
+                   return_value={"45.60.102.77": ["www.example.net", "cdn.example.net"]}):
+            verdict = tacu_network._host_matches(self.WAF_ROWS, "ab-inbev.com")
+        self.assertFalse(verdict["host_connected"])
+        self.assertEqual(verdict["match_count"], 0)
+
+    def test_wildcard_certificates_cover_subdomains(self) -> None:
+        self.assertTrue(tacu_network._covers(["*.github.com"], "api.github.com"))
+        self.assertTrue(tacu_network._covers(["ab-inbev.com"], "ab-inbev.com"))
+        self.assertFalse(tacu_network._covers(["*.github.com"], "github.evil.example"))
+        self.assertFalse(tacu_network._covers(["www.example.net"], "ab-inbev.com"))
+
+    def test_only_already_connected_tls_endpoints_are_probed(self) -> None:
+        seen: list[str] = []
+
+        def record(addresses, sni):
+            seen.extend(addresses)
+            return {}
+
+        rows = self.WAF_ROWS + [
+            {"command": "x", "pid": 1, "remote_host": "10.0.0.5", "remote_port": 443, "name": ""},
+            {"command": "y", "pid": 2, "remote_host": "198.51.100.4", "remote_port": 22, "name": ""},
+        ]
+        with patch("tacu.tools.network._host_addresses", return_value=[]), \
+             patch("tacu.tools.network._reverse_names", return_value={}), \
+             patch("tacu.tools.network._certificate_map", side_effect=record):
+            tacu_network._host_matches(rows, "ab-inbev.com")
+        self.assertIn("45.60.102.77", seen)
+        self.assertNotIn("10.0.0.5", seen, "private addresses must not be dialled")
+        self.assertNotIn("198.51.100.4", seen, "non-TLS ports must not be dialled")
+
+    def test_a_negative_answer_reports_what_was_checked(self) -> None:
+        data = {"operation": "connections", "host": "ab-inbev.com", "host_connected": False,
+                "host_matches": [], "resolved": True, "certificate_checked": 8,
+                "unattributed_tls": 19, "connections": [], "state": "ESTABLISHED"}
+        answer = exact_host_answer("am i connected to ab-inbev.com", [{"result": {"data": data}}])
+        self.assertIn("No TCP connection to ab-inbev.com", answer)
+        self.assertIn("8 of 19", answer)
+
+    def test_a_positive_answer_names_the_evidence(self) -> None:
+        data = {"operation": "connections", "host": "ab-inbev.com", "host_connected": True,
+                "resolved": True, "certificate_checked": 1, "unattributed_tls": 1,
+                "state": "ESTABLISHED",
+                "host_matches": [{"command": "Chrome", "pid": 2758, "remote_host": "45.60.102.77",
+                                  "remote_port": 443, "state": "ESTABLISHED",
+                                  "matched_by": "tls-certificate",
+                                  "certificate_names": ["ab-inbev.com", "www.ab-inbev.com"]}],
+                "connections": []}
+        answer = exact_host_answer("am i connected to ab-inbev.com", [{"result": {"data": data}}])
+        self.assertIn("Yes.", answer)
+        self.assertIn("TLS certificate names it", answer)
+        self.assertIn("certificate serves:", answer)
+
+
+class ElevatedForensicsTests(unittest.TestCase):
+    """Depth that needs root must not cost the "no sudo store" guarantee."""
+
+    def _context(self, approved: bool) -> ToolContext:
+        return ToolContext(workspace=Path("."), state_dir=Path("."), approve_dangerous=approved)
+
+    def test_elevation_requires_a_reviewed_plan(self) -> None:
+        with self.assertRaises(ToolFailure) as raised:
+            forensics.execute(self._context(False), operation="sweep", elevated=True)
+        self.assertIn("ti do", str(raised.exception))
+
+    def test_unelevated_runs_stay_available_without_review(self) -> None:
+        result = forensics.execute(self._context(False), operation="persistence", limit=3)
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn("elevation", result)
+
+    def test_a_missing_credential_is_reported_never_prompted(self) -> None:
+        with patch("tacu.tools.forensics._sudo_ready", return_value=False):
+            result = forensics.execute(self._context(True), operation="persistence", elevated=True)
+        elevation = result["elevation"]
+        self.assertFalse(elevation["elevated"])
+        self.assertIn("will not ask for your password", elevation["reason"])
+        self.assertIn("sudo -v", elevation["next_step"])
+        self.assertTrue(elevation["would_run"], "the user must see what would run")
+
+    def test_every_elevated_command_is_read_only_and_fixed(self) -> None:
+        writes = {"rm", "mv", "cp", "chmod", "chown", "kill", "launchctl", "systemctl",
+                  "tee", "dd", "mkfs", "install", "apt", "brew", "sh", "bash"}
+        for label, scope, argv in forensics._ELEVATED_CHECKS:
+            self.assertIn(scope, {"any", "macos", "linux"}, label)
+            self.assertNotIn(argv[0], writes, f"{label} runs a command that can write")
+            self.assertFalse(any(">" in part or "|" in part for part in argv), label)
+
+    def test_elevated_commands_are_run_non_interactively(self) -> None:
+        calls: list[list[str]] = []
+
+        def record(argv, **kwargs):
+            calls.append(argv)
+            return {"exit_code": 0, "stdout": "", "stderr": "", "command": argv}
+
+        with patch("tacu.tools.forensics._sudo_ready", return_value=True), \
+             patch("tacu.tools.forensics.run_argv", side_effect=record), \
+             patch("tacu.tools.forensics.which", side_effect=lambda name: f"/usr/bin/{name}"):
+            forensics.execute(self._context(True), operation="persistence", elevated=True)
+        sudo_calls = [argv for argv in calls if argv and argv[0] == "sudo"]
+        self.assertTrue(sudo_calls)
+        for argv in sudo_calls:
+            self.assertEqual(argv[1], "-n", "sudo must never be allowed to prompt")

@@ -29,6 +29,12 @@ User data belongs in `~/.local/share/tacu/` (or `%LOCALAPPDATA%\tacu` on Windows
 
 TACU does not store an administrator password or maintain a sudo keepalive.
 
+Elevated forensic checks keep that promise. TACU never prompts for, reads, or stores a
+password: you authenticate to `sudo` yourself, and TACU then runs a fixed, read-only,
+never-model-authored list of commands with `sudo -n`. Without a valid credential it prints
+what it would have run and stops. Elevation is available only through a reviewed `ti do`
+plan, so the exact commands are shown before anything runs.
+
 ## Reporting
 
 Do **not** open a public issue for a suspected vulnerability.

@@ -1001,3 +1001,25 @@ class ThinkingBudgetTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class SingleVersionSourceTests(unittest.TestCase):
+    """A release must not be able to half-happen across several files."""
+
+    def _root(self) -> Path:
+        return Path(__file__).resolve().parents[1]
+
+    def test_pyproject_declares_the_version_dynamic(self) -> None:
+        text = (self._root() / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('dynamic = ["version"]', text)
+        self.assertNotRegex(text, r'(?m)^version\s*=', "a static version would drift from __init__")
+
+    def test_the_build_backend_reads_the_package_version(self) -> None:
+        import importlib.util
+
+        path = self._root() / "tacu_build_backend.py"
+        spec = importlib.util.spec_from_file_location("tacu_build_backend_under_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.VERSION, __version__)
+        self.assertIn(f"Version: {__version__}", module._metadata())

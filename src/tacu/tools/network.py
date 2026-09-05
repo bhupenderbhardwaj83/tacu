@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import ssl
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -78,19 +79,77 @@ REVERSE_LOOKUP_CAP = 80
 REVERSE_LOOKUP_TIMEOUT = 1.5
 
 
-def _host_addresses(host: str) -> list[str]:
-    """Forward-resolve the asked host so its current addresses can be matched."""
+CERTIFICATE_PROBE_CAP = 12
+CERTIFICATE_PROBE_TIMEOUT = 4.0
+RESOLVE_ROUNDS = 3
 
-    try:
-        info = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except (OSError, UnicodeError):
-        return []
+
+def _host_addresses(host: str) -> list[str]:
+    """Collect the host's addresses.
+
+    A CDN or WAF answers with a rotating slice of its edge, so one lookup is a
+    sample rather than the set. Asking a few times widens it cheaply.
+    """
+
     found: list[str] = []
-    for entry in info:
-        address = entry[4][0]
-        if address and address not in found:
-            found.append(address)
+    for _ in range(RESOLVE_ROUNDS):
+        try:
+            info = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except (OSError, UnicodeError):
+            break
+        for entry in info:
+            address = entry[4][0]
+            if address and address not in found:
+                found.append(address)
     return found
+
+
+def _certificate_names(address: str, sni: str, port: int = 443) -> list[str]:
+    """Names the endpoint at `address` serves, read from its TLS certificate.
+
+    Behind a CDN or WAF the address belongs to the provider, so neither the
+    address nor its PTR record names the site. The certificate does. Only
+    addresses this machine is already connected to are dialled.
+    """
+
+    context = ssl.create_default_context()
+    context.check_hostname = False  # dialling by address on purpose; the SAN list is the answer
+    try:
+        with socket.create_connection((address, port), timeout=CERTIFICATE_PROBE_TIMEOUT) as raw:
+            with context.wrap_socket(raw, server_hostname=sni) as secure:
+                certificate = secure.getpeercert() or {}
+    except (OSError, ssl.SSLError, ValueError):
+        return []
+    return [value for key, value in certificate.get("subjectAltName", ()) if key == "DNS"]
+
+
+def _certificate_map(addresses: list[str], sni: str) -> dict[str, list[str]]:
+    targets = addresses[:CERTIFICATE_PROBE_CAP]
+    if not targets:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+        names = pool.map(lambda address: (address, _certificate_names(address, sni)), targets)
+    return {address: found for address, found in names if found}
+
+
+def _is_private(address: str) -> bool:
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return parsed.is_private or parsed.is_loopback or parsed.is_link_local
+
+
+def _covers(names: list[str], wanted: str) -> bool:
+    for name in names:
+        candidate = name.casefold().strip(".")
+        if candidate == wanted:
+            return True
+        if candidate.startswith("*.") and wanted.endswith(candidate[1:]):
+            return True
+        if wanted.endswith("." + candidate):
+            return True
+    return False
 
 
 def _reverse_names(addresses: list[str]) -> dict[str, str]:
@@ -140,6 +199,7 @@ def _host_matches(rows: list[dict[str, Any]], host: str) -> dict[str, Any]:
         return ""
 
     matches: list[dict[str, Any]] = []
+    unattributed: list[str] = []
     for row in rows:
         reason = belongs(row)
         if reason:
@@ -147,9 +207,29 @@ def _host_matches(rows: list[dict[str, Any]], host: str) -> dict[str, Any]:
             item["matched_by"] = reason
             item["remote_name"] = names.get(str(row.get("remote_host") or ""), "")
             matches.append(item)
+        elif str(row.get("remote_port") or "") == "443":
+            remote = str(row.get("remote_host") or "")
+            if remote and remote not in unattributed and not _is_private(remote):
+                unattributed.append(remote)
+
+    # Behind a CDN or WAF the address and its PTR record name the provider, not the
+    # site, so neither can answer the question. Ask the endpoints already connected
+    # on 443 which names they serve.
+    certificates = _certificate_map(unattributed, wanted) if wanted and unattributed else {}
+    for row in rows:
+        remote = str(row.get("remote_host") or "")
+        served = certificates.get(remote) or []
+        if served and _covers(served, wanted):
+            item = dict(row)
+            item["matched_by"] = "tls-certificate"
+            item["remote_name"] = names.get(remote, "")
+            item["certificate_names"] = served[:12]
+            matches.append(item)
     return {"host": host, "host_addresses": addresses, "host_matches": matches,
             "match_count": len(matches), "host_connected": bool(matches),
-            "resolved": bool(addresses)}
+            "resolved": bool(addresses),
+            "certificate_checked": len(certificates),
+            "unattributed_tls": len(unattributed)}
 
 
 def execute(context: ToolContext, *, operation: str, limit: int = 10, port: int | None = None,

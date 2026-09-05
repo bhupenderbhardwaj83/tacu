@@ -6,12 +6,25 @@ import base64
 import csv
 import hashlib
 import io
+import re
 import tarfile
 import zipfile
 from pathlib import Path
 
 NAME = "tacu"
-VERSION = "0.1.0"
+
+
+def _version() -> str:
+    """Read the one place the version lives, so a release cannot half-happen."""
+
+    source = (Path(__file__).parent / "src" / NAME / "__init__.py").read_text(encoding="utf-8")
+    match = re.search(r'^__version__ = "([^"]+)"', source, re.MULTILINE)
+    if not match:
+        raise RuntimeError(f"No __version__ found in src/{NAME}/__init__.py")
+    return match.group(1)
+
+
+VERSION = _version()
 DIST_INFO = f"{NAME}-{VERSION}.dist-info"
 ROOT = Path(__file__).parent
 

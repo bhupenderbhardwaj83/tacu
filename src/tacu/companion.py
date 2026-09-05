@@ -402,6 +402,15 @@ def _process_answer(query: str, facts: dict[str, Any]) -> str | None:
     return "\n".join(lines) if lines else None
 
 
+# How a connection was tied to the asked name, strongest evidence first.
+_MATCH_EVIDENCE = {
+    "address": "address matches DNS",
+    "reverse-dns": "reverse DNS",
+    "tls-certificate": "TLS certificate names it",
+    "name": "name seen in the socket",
+}
+
+
 def _host_connection_answer(facts: dict[str, Any]) -> str | None:
     """Answer "am I connected to X" with a verdict and the owning process."""
 
@@ -410,9 +419,15 @@ def _host_connection_answer(facts: dict[str, Any]) -> str | None:
         return None
     matches = facts.get("host_matches") or []
     if not matches:
-        detail = ("" if facts.get("resolved")
-                  else f" {host} did not resolve, so only its literal name was compared.")
-        return f"No TCP connection to {host}.{detail}"
+        lines = [f"No TCP connection to {host}."]
+        if not facts.get("resolved"):
+            lines.append(f"{host} did not resolve, so only its literal name could be compared.")
+        probed = facts.get("certificate_checked") or 0
+        outstanding = facts.get("unattributed_tls") or 0
+        if outstanding:
+            lines.append(f"Checked the certificates of {probed} of {outstanding} other TLS "
+                         "endpoints; none serve that name.")
+        return "\n".join(lines)
     owners: list[str] = []
     for item in matches:
         label = f"{item.get('command') or 'unknown'} (pid {item.get('pid')})"
@@ -422,11 +437,15 @@ def _host_connection_answer(facts: dict[str, Any]) -> str | None:
     lines = [f"Yes. {len(matches)} TCP connection{plural} to {host}, "
              f"owned by {', '.join(owners[:6])}."]
     for item in matches[:8]:
+        evidence = _MATCH_EVIDENCE.get(item.get("matched_by") or "", item.get("matched_by") or "")
         name = item.get("remote_name")
         suffix = f" · {name}" if name and name != item.get("remote_host") else ""
         lines.append(f"- {item.get('command')} (pid {item.get('pid')}) → "
                      f"{item.get('remote_host')}:{item.get('remote_port')} "
-                     f"{item.get('state') or ''}".rstrip() + suffix)
+                     f"{item.get('state') or ''}".rstrip() + suffix + f" [{evidence}]")
+        served = item.get("certificate_names") or []
+        if served:
+            lines.append(f"    certificate serves: {', '.join(served[:5])}")
     if len(matches) > 8:
         lines.append(f"... and {len(matches) - 8} more.")
     return "\n".join(lines)
@@ -722,6 +741,8 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
                 "host_connected": data.get("host_connected"),
                 "host_matches": data.get("host_matches"),
                 "resolved": data.get("resolved"),
+                "certificate_checked": data.get("certificate_checked"),
+                "unattributed_tls": data.get("unattributed_tls"),
             })
             if answer:
                 lines.append(answer)

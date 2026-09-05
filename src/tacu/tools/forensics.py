@@ -18,7 +18,7 @@ from typing import Any
 
 from ..host_parsers import parse_lsof_network
 from ..platform import detect, run_argv, which
-from .contracts import ToolContext, ToolSpec, schema
+from .contracts import ToolContext, ToolFailure, ToolSpec, schema
 
 SPEC = ToolSpec(
     "forensics",
@@ -30,6 +30,7 @@ SPEC = ToolSpec(
         "operation": {"type": "string",
                       "enum": ["sweep", "outbound", "listening", "persistence", "secret_access"]},
         "limit": {"type": "integer"},
+        "elevated": {"type": "boolean"},
     }, required=("operation",)),
     schema(properties={"status": {"type": "string"}, "operation": {"type": "string"}}),
     timeout=60, risk_level="read", permissions=("host:read",),
@@ -396,17 +397,72 @@ def _score(outbound: dict[str, Any], listening: dict[str, Any],
             "high_count": sum(1 for item in findings if item["severity"] == "high")}
 
 
-def execute(context: ToolContext, *, operation: str, limit: int = 25) -> dict[str, Any]:
-    del context
+# Read-only, fixed, and never model-authored. `ti auto` still refuses to invent sudo;
+# these are the only commands TACU will ever elevate, and none of them can write.
+_ELEVATED_CHECKS: tuple[tuple[str, str, list[str]], ...] = (
+    ("all-user sockets", "any", ["lsof", "-nP", "-i"]),
+    ("root crontab", "any", ["crontab", "-l", "-u", "root"]),
+    ("system launch daemons", "macos", ["ls", "-la", "/Library/LaunchDaemons"]),
+    ("system-wide cron", "linux", ["ls", "-la", "/etc/cron.d"]),
+)
+
+
+def _sudo_ready() -> bool:
+    """True when the user already holds a valid sudo timestamp.
+
+    TACU never prompts for, reads, or stores the password: `sudo -n` either uses a
+    credential the user established themselves or fails, and failure is reported.
+    """
+
+    if not which("sudo"):
+        return False
+    return run_argv(["sudo", "-n", "true"], timeout=10).get("exit_code") == 0
+
+
+def _elevated(limit: int) -> dict[str, Any]:
+    system = detect().os
+    planned = [(label, argv) for label, scope, argv in _ELEVATED_CHECKS
+               if scope in ("any", system) and which(argv[0])]
+    if not _sudo_ready():
+        return {
+            "elevated": False,
+            "reason": "no valid sudo credential; TACU will not ask for your password",
+            "next_step": "Run `sudo -v` yourself, then repeat this check within the sudo timeout.",
+            "would_run": [" ".join(["sudo", *argv]) for _, argv in planned],
+        }
+    collected: list[dict[str, Any]] = []
+    for label, argv in planned:
+        raw = run_argv(["sudo", "-n", *argv], timeout=SPEC.timeout)
+        collected.append({
+            "check": label,
+            "command": " ".join(["sudo", *argv]),
+            "ok": raw.get("exit_code") == 0,
+            "lines": (raw.get("stdout") or "").splitlines()[:limit],
+        })
+    return {"elevated": True, "checks": collected, "check_count": len(collected)}
+
+
+def execute(context: ToolContext, *, operation: str, limit: int = 25,
+            elevated: bool = False) -> dict[str, Any]:
     cap = max(1, min(int(limit or 25), 200))
+    elevation: dict[str, Any] | None = None
+    if elevated:
+        if not context.approve_dangerous:
+            raise ToolFailure(
+                "Elevated forensics needs a reviewed plan. Use `ti do` so the exact sudo "
+                "commands are shown before anything runs.",
+                code="review_required")
+        elevation = _elevated(cap)
+    del context
+    extra = {"elevation": elevation} if elevation is not None else {}
     if operation == "outbound":
-        return {"status": "success", **_outbound(cap), "exit_code": 0}
+        return {"status": "success", **_outbound(cap), **extra, "exit_code": 0}
     if operation == "listening":
-        return {"status": "success", **_listening(cap), "exit_code": 0}
+        return {"status": "success", **_listening(cap), **extra, "exit_code": 0}
     if operation == "persistence":
-        return {"status": "success", **_persistence(cap), "exit_code": 0}
+        return {"status": "success", **_persistence(cap), **extra, "exit_code": 0}
     if operation == "secret_access":
-        return {"status": "success", **_secret_access(cap), "exit_code": 0}
+        return {"status": "success", **_secret_access(cap), **extra, "exit_code": 0}
     outbound = _outbound(cap)
     listening = _listening(cap)
     persistence = _persistence(cap)
@@ -420,6 +476,8 @@ def execute(context: ToolContext, *, operation: str, limit: int = 25) -> dict[st
         "persistence": persistence,
         "secret_access": secrets,
         **verdict,
-        "not_inspected": (persistence.get("not_inspected") or []) + (secrets.get("not_inspected") or []),
+        **extra,
+        "not_inspected": ((persistence.get("not_inspected") or []) + (secrets.get("not_inspected") or [])
+                          if not (elevation or {}).get("elevated") else []),
         "exit_code": 0,
     }
