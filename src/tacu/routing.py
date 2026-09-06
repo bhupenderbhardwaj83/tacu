@@ -665,6 +665,15 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("docker", "container"),
                "Show Docker container resource stats"),
     # High-value Mac ops that exist in tools but were missing from the planner catalog.
+    Capability("application", "open",
+               ("open google chrome", "open chrome", "open safari", "open firefox",
+                "open the app", "open application", "launch application", "launch the app",
+                "open browser", "launch browser", "open in chrome", "open in safari",
+                "open in firefox", "launch chrome", "open website", "open the website",
+                "open the site", "launch the site", "open url", "browse to"),
+               ("open", "launch", "browser", "website", "site", "url"),
+               "Open an installed application, optionally at a web address",
+               risk="host_mutate"),
     Capability("process", "graph",
                ("what is running on port", "which process is using port", "what is using port",
                 "who is on port", "process on port", "running on port", "owns port",
@@ -732,10 +741,6 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("docker volumes", "list docker volumes"),
                ("docker", "volume"),
                "List Docker volumes"),
-    Capability("application", "open",
-               ("open the app", "launch the application", "open application"),
-               ("application", "app", "open"),
-               "Open an installed application"),
     Capability("security", "process_signature",
                ("process signature", "signed process", "codesign of process"),
                ("codesign", "process", "signature"),
@@ -870,6 +875,9 @@ def intent_wants_host_mutate(intent: str) -> bool:
     text = normalize_intent_text(intent)
     return bool(re.search(
         r"\b(kill|terminate|sigterm|sigkill|brew install|brew upgrade|brew uninstall|brew remove|"
+        r"(?:open|launch|start)\s+(?:up\s+)?(?:the\s+)?(?:app(?:lication)?|browser|chrome|safari|"
+        r"firefox|edge|brave|terminal|finder)\b|"
+        r"(?:open|launch|browse)\s+(?:to\s+)?(?:the\s+)?[^\s]*\.(?:com|org|net|io|dev|in|co|ai)\b|"
         r"install (?:the )?(?:package|formula)|upgrade (?:the )?(?:package|formula)|"
         r"uninstall (?:the )?(?:package|formula)|"
         r"(?:start|stop|restart) (?:the )?(?:service|container|docker)|"
@@ -1020,6 +1028,71 @@ def connection_state_from_intent(intent: str) -> str:
     if re.search(r"\b(?:all states|any state|every state)\b", text):
         return "ANY"
     return "ESTABLISHED"
+
+
+# A bare domain still names a site; anything with a scheme must be http(s).
+_URL_IN_INTENT = re.compile(
+    r"\bhttps?://[^\s'\"]+|\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+"
+    r"(?:com|org|net|io|dev|ai|co|in|uk|edu|gov|app|me|tv|news|xyz)\b(?:/[^\s'\"]*)?",
+    re.I)
+# Trailing words that describe the app rather than name it.
+_APP_TAIL = re.compile(r"(?i)\s+(?:web\s+)?(?:browser|app|application|window|program)\s*$")
+_APP_AFTER_OPEN = re.compile(
+    r"(?i)\b(?:open|launch|start|run)\s+(?:up\s+)?(?:the\s+)?(?:app(?:lication)?\s+)?"
+    r"(.+?)(?=\s+(?:and|then|with|at|to|on|in|from|,)\b|$)")
+_APP_AFTER_IN = re.compile(
+    r"(?i)\b(?:in|on|using|via|with)\s+(?:the\s+)?([A-Za-z][\w .+-]*?)\s*$")
+
+
+def url_from_intent(intent: str) -> str | None:
+    """The address a request names, normalised to something openable."""
+
+    match = _URL_IN_INTENT.search(intent or "")
+    if not match:
+        return None
+    found = match.group(0).rstrip(".,;:'\"")
+    if found.casefold().startswith(("http://", "https://")):
+        return found
+    return f"https://{found}"
+
+
+# "on it", "in there" — a pronoun points back at something, it does not name an app.
+_PRONOUNS = frozenset(("it", "this", "that", "them", "those", "these", "there", "here",
+                       "one", "same", "browser", "app", "application"))
+
+
+def _clean_app_name(raw: str) -> str:
+    name = raw.strip().strip("'\"`.,")
+    name = _APP_TAIL.sub("", name).strip()
+    if _URL_IN_INTENT.search(name):
+        name = _URL_IN_INTENT.sub("", name).strip()
+    lowered = name.casefold()
+    if lowered in _APP_NAME_STOPWORDS or lowered in _PRONOUNS:
+        return ""
+    return name
+
+
+def app_to_open_from_intent(intent: str) -> str | None:
+    """Which application a request wants launched.
+
+    Only the phrase is taken here; matching it to something installed is the
+    application tool's job, so "google chrome" finds "Google Chrome.app" without
+    anything needing to know that name in advance.
+    """
+
+    text = (intent or "").strip()
+    without_url = _URL_IN_INTENT.sub(" ", text)
+    trailing = _APP_AFTER_IN.search(without_url)
+    if trailing:
+        name = _clean_app_name(trailing.group(1))
+        if name:
+            return name
+    leading = _APP_AFTER_OPEN.search(without_url)
+    if leading:
+        name = _clean_app_name(leading.group(1))
+        if name:
+            return name
+    return None
 
 
 def _app_name_from_intent(intent: str) -> str | None:
@@ -1678,6 +1751,13 @@ def score_capability(intent: str, capability: Capability) -> int:
             score -= 80
         elif any(phrase in text for phrase in ("ip address", "my ip", "primary ip")):
             score += 20
+    if capability.tool == "application" and capability.operation == "open":
+        # An openable name plus an opening verb is what an open request looks like;
+        # no list of application names is needed to recognise one.
+        if app_to_open_from_intent(intent) or url_from_intent(intent):
+            score += 60
+        else:
+            score -= 40
     if capability.tool == "docker" and "docker" not in text and "container" not in text:
         score -= 80
     if capability.tool == "docker" and capability.operation == "inspect":
@@ -1863,7 +1943,10 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
             if (cap.tool, cap.operation) in seen_caps:
                 continue
             extras.append((max(score_capability(intent, cap), SHORTLIST_MIN_SCORE + 10), cap))
-        matches = extras + matches
+        # Rank the whole field by score. Prepending the host-mutate candidates put a
+        # floor-scored one ahead of a capability that actually matched the words, so
+        # "launch apple.com" was answered by docker start.
+        matches = sorted(extras + matches, key=lambda pair: -pair[0])
     if not matches:
         return []
     steps: list[dict[str, Any]] = []
@@ -1950,6 +2033,16 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
             inputs["limit"] = limit_from_intent(intent, default=40)
         if capability.operation in {"connections", "port_owner"} and port:
             inputs["port"] = port
+        if capability.tool == "application" and capability.operation == "open":
+            wanted = app_to_open_from_intent(intent)
+            address = url_from_intent(intent)
+            if not wanted and not address:
+                continue
+            if wanted:
+                inputs["name"] = wanted
+            if address:
+                inputs["url"] = address
+            inputs.pop("limit", None)
         if capability.tool == "process" and capability.operation == "graph":
             if port:
                 inputs["port"] = port
@@ -1964,7 +2057,8 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
             # A named host turns a ranking into a yes/no question about that host.
             if host:
                 inputs["host"] = host
-        if capability.tool == "application" and app and capability.operation != "list":
+        if (capability.tool == "application" and app and capability.operation != "list"
+                and not inputs.get("name")):
             inputs["name"] = app
         if capability.tool == "application" and capability.operation != "list" and not inputs.get("name"):
             continue

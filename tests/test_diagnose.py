@@ -244,3 +244,50 @@ class ToolchainDiscoveryTests(unittest.TestCase):
         rendered = json.dumps(steps)
         self.assertNotIn('"pip3"', rendered)
         self.assertNotIn('"executable": "pip"', rendered)
+
+
+class ServerAndVerificationTests(unittest.TestCase):
+    """Waiting on a process that never returns is waiting for it to crash."""
+
+    def test_server_shapes_are_recognised(self) -> None:
+        for command, source in (
+            (["python3", "manage.py", "runserver"], ""),
+            (["python3", "-m", "http.server", "8000"], ""),
+            (["node", "server.js"], "require('http').createServer().listen(3000)"),
+            ([".venv/bin/python", "app.py"], "from flask import Flask\napp.run()\n"),
+        ):
+            self.assertTrue(diagnose.looks_like_a_server(command, source), command)
+
+    def test_ordinary_programs_are_not_mistaken_for_servers(self) -> None:
+        for command, source in ((["python3", "tests.py"], "print(1)"),
+                                (["ls", "-la"], ""),
+                                (["python3", "app.py"], "from flask import Flask\napp=Flask(__name__)\n")):
+            self.assertFalse(diagnose.looks_like_a_server(command, source), command)
+
+    def test_an_install_is_confirmed_by_importing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            steps = diagnose.remedy(MISSING_FLASK, Path(directory), None)
+        self.assertTrue(any(step["inputs"]["args"][:1] == ["-c"]
+                            and "import flask" in " ".join(step["inputs"]["args"])
+                            for step in steps), "the install is never verified")
+
+    def test_a_server_is_reported_rather_than_waited_on(self) -> None:
+        failed = {"tool": "shell", "operation": "run",
+                  "inputs": {"executable": "python3", "args": ["app.py"], "cwd": "."}}
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "app.py").write_text("from flask import Flask\napp=Flask(__name__)\napp.run()\n")
+            steps = diagnose.remedy(MISSING_FLASK, workspace, failed)
+        final = steps[-1]
+        self.assertTrue(final.get("server"), "a blocking server should not be run and awaited")
+        self.assertIn("runs until stopped", final["purpose"])
+
+    def test_a_program_that_terminates_is_simply_retried(self) -> None:
+        failed = {"tool": "shell", "operation": "run",
+                  "inputs": {"executable": "python3", "args": ["app.py"], "cwd": "."}}
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "app.py").write_text("from flask import Flask\napp=Flask(__name__)\n")
+            steps = diagnose.remedy(MISSING_FLASK, workspace, failed)
+        self.assertEqual(steps[-1]["inputs"]["args"], ["app.py"])
+        self.assertFalse(steps[-1].get("server"))

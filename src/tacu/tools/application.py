@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import plistlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,7 @@ SPEC = ToolSpec(
     schema(properties={
         "operation": {"type": "string", "enum": ["find", "list", "version", "metadata", "running", "signature", "open"]},
         "name": {"type": "string"},
+        "url": {"type": "string"},
         "limit": {"type": "integer"},
     }, required=("operation",)),
     schema(properties={"status": {"type": "string"}, "operation": {"type": "string"}}),
@@ -142,7 +145,27 @@ def _list_apps(limit: int) -> list[Path]:
     return found
 
 
-def execute(context: ToolContext, *, operation: str, name: str = "", limit: int = 40) -> dict[str, Any]:
+_SAFE_URL = re.compile(r"^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
+
+
+def _open_argv(app_path: str | None, url: str) -> list[str]:
+    """Launch an app, optionally at a page, without going through a shell.
+
+    Every part is a separate argument, so a crafted name or address cannot become
+    another command.
+    """
+
+    if detect().os == "macos":
+        if app_path and url:
+            return ["open", "-a", app_path, url]
+        return ["open", "-a", app_path] if app_path else ["open", url]
+    if url:
+        return ["xdg-open", url]
+    return ["xdg-open", app_path or ""]
+
+
+def execute(context: ToolContext, *, operation: str, name: str = "", url: str = "",
+            limit: int = 40) -> dict[str, Any]:
     cap = max(1, min(int(limit or 40), 80))
     needle = name.strip()
     if operation == "list" or (operation in {"find", "version", "metadata"} and not needle):
@@ -186,12 +209,19 @@ def execute(context: ToolContext, *, operation: str, name: str = "", limit: int 
     if operation == "open":
         from .contracts import require_approval
         require_approval(context, "application.open")
-        if not apps:
-            return {"status": "no_results", "operation": operation, "query": name, "applications": [], "exit_code": 1}
-        opener = "open" if detect().os == "macos" else "xdg-open"
-        raw = run_argv([opener, apps[0]["path"]], timeout=SPEC.timeout)
+        target = (url or "").strip()
+        if target and not _SAFE_URL.match(target):
+            raise ToolFailure(
+                "Only http and https addresses can be opened, and they must contain no "
+                "shell characters.", code="invalid_arguments")
+        if not apps and not target:
+            return {"status": "no_results", "operation": operation, "query": name,
+                    "applications": [], "exit_code": 1}
+        app_path = apps[0]["path"] if apps else None
+        raw = run_argv(_open_argv(app_path, target), timeout=SPEC.timeout)
         return {"status": "success" if raw["exit_code"] == 0 else "error", "operation": operation,
-                "query": name, "applications": apps[:1], "path": apps[0]["path"], "exit_code": raw["exit_code"]}
+                "query": name, "url": target or None, "applications": apps[:1],
+                "path": app_path, "opened": raw.get("command"), "exit_code": raw["exit_code"]}
     raw = run_argv(process_list_argv_with_header(), timeout=SPEC.timeout)
     needle = name.casefold().removesuffix(".app")
     running = [item for item in parse_ps(raw["stdout"])

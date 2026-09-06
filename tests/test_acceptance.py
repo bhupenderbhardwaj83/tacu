@@ -42,8 +42,9 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(missing, "an index page was requested and none exists")
         self.assertIn("html", missing[0][1])
 
-    def test_an_html_page_satisfies_it(self) -> None:
-        claims = acceptance.criteria_for(INDEX_REQUEST)
+    def test_an_html_page_satisfies_the_file_claim(self) -> None:
+        claims = [item for item in acceptance.criteria_for(INDEX_REQUEST)
+                  if item.kind == "file_of_kind"]
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             (workspace / "index.html").write_text("<!doctype html><html><body>hi</body></html>")
@@ -77,3 +78,35 @@ class CheckTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BehaviourClaimTests(unittest.TestCase):
+    """A request describes behaviour, and some of it leaves a mark worth checking."""
+
+    def test_the_original_request_yields_all_three_claims(self) -> None:
+        claims = [item.describes for item in acceptance.criteria_for(INDEX_REQUEST)]
+        self.assertTrue(any("index page" in item for item in claims))
+        self.assertTrue(any("collects input" in item for item in claims))
+        self.assertTrue(any("greets" in item for item in claims))
+
+    def test_a_page_missing_the_behaviour_is_not_done(self) -> None:
+        claims = acceptance.criteria_for(INDEX_REQUEST)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "index.html").write_text("<!doctype html><html><body>hi there</body></html>")
+            missing = [item.describes for item, _why in acceptance.unmet(claims, workspace)]
+        self.assertIn("it collects input from the user", missing)
+
+    def test_a_page_that_does_it_passes_every_claim(self) -> None:
+        claims = acceptance.criteria_for(INDEX_REQUEST)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "index.html").write_text(
+                "<!doctype html><html><body><form><input name='username'></form>"
+                "<p>Hello!</p></body></html>")
+            self.assertEqual(acceptance.unmet(claims, workspace), [])
+
+    def test_behaviour_is_only_claimed_where_it_could_be_seen(self) -> None:
+        claims = acceptance.criteria_for("create a stylesheet that greets the user")
+        self.assertFalse(any("greets" in item.describes for item in claims),
+                         "a .css file cannot be checked for a greeting")

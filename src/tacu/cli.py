@@ -2912,6 +2912,7 @@ def _execute_intent_steps(steps: tuple[Any, ...] | list[Any], *, workspace: Path
         index = start_index + offset
         decision = evaluate_policy(proposed, workspace)
         step = proposed
+        reviewed = False
         if not autonomous or not decision.autonomous:
             print()
             print(paint(f"STEP {index}/{start_index + total - 1} · {proposed.purpose}", PALETTE.accent + PALETTE.bold))
@@ -2921,10 +2922,15 @@ def _execute_intent_steps(steps: tuple[Any, ...] | list[Any], *, workspace: Path
                 print(paint("Plan stopped by you. Remaining commands were not executed.", PALETTE.muted))
                 return None
             decision = evaluate_policy(step, workspace)
+            reviewed = True
         elif _verbose_ui():
             print()
             print(paint(f"AUTO {index}/{start_index + total - 1} · {step.display}", PALETTE.green + PALETTE.bold))
-        result = _run_intent_step(step, workspace, timeout, approved=decision.level == "prompt")
+        # Seeing the exact step and choosing to run it *is* the explicit review some
+        # tools ask for. Inferring approval from the policy level alone made an
+        # operation that is classed safe but gated impossible to ever run.
+        result = _run_intent_step(step, workspace, timeout,
+                                  approved=reviewed or decision.level == "prompt")
         results.append({"step": index, "purpose": step.purpose, "command": step.argv,
                         "policy": decision.level, "result": result.as_dict()})
         exit_code = int((result.data or {}).get("exit_code", 0 if result.ok else 1))

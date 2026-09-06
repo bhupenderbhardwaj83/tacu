@@ -72,6 +72,42 @@ def criteria_for(intent: str) -> list[Criterion]:
     for name in named:
         if name.casefold().endswith((".py", ".sh", ".html", ".htm", ".json")):
             claims.append(Criterion(f"{name} is well formed", "parses", name))
+    claims.extend(_behaviour_claims(intent, named, kind))
+    return claims
+
+
+# Behaviour a request describes, and the mark it leaves in the artefact. Only
+# claims that can be settled by reading the file belong here.
+_BEHAVIOURS: tuple[tuple[re.Pattern[str], str, tuple[str, ...], tuple[str, ...]], ...] = (
+    (re.compile(r"(?i)\b(?:tak(?:e|es|ing)|accept(?:s|ing)?|ask(?:s|ing)?|enter(?:s|ing)?|"
+                r"input|prompt(?:s|ing)?|read(?:s|ing)?)\b.{0,40}"
+                r"\b(?:input|name|username|user|value|text)\b"),
+     "collects input from the user",
+     (".html", ".htm"), ("<input", "<form", "<textarea", "prompt(")),
+    (re.compile(r"(?i)\b(?:greet(?:s|ing)?|hello|welcome|hi\b)"),
+     "greets the user",
+     (".html", ".htm", ".py", ".js"), ("hello", "welcome", "greet", "hi ")),
+    (re.compile(r"(?i)\bbutton\b"),
+     "has a button",
+     (".html", ".htm"), ("<button", "type=\"submit\"", "type='submit'")),
+)
+
+
+def _behaviour_claims(intent: str, named: list[str],
+                      kind: tuple[tuple[str, ...], str] | None) -> list[Criterion]:
+    suffixes = list(kind[0]) if kind else []
+    for name in named:
+        suffix = Path(name).suffix.casefold()
+        if suffix and suffix not in suffixes:
+            suffixes.append(suffix)
+    claims: list[Criterion] = []
+    for pattern, describes, applies_to, markers in _BEHAVIOURS:
+        if not pattern.search(intent or ""):
+            continue
+        if not any(suffix in applies_to for suffix in suffixes):
+            continue
+        claims.append(Criterion(f"it {describes}", "contains_any",
+                                json.dumps({"suffixes": suffixes, "markers": list(markers)})))
     return claims
 
 
@@ -137,6 +173,21 @@ def check(criteria: list[Criterion], workspace: Path) -> list[tuple[Criterion, b
             else:
                 ok, why = _parses(target)
                 outcome.append((item, ok, why))
+        elif item.kind == "contains_any":
+            spec = json.loads(item.detail)
+            found = _files_of_kind(workspace, spec["suffixes"])
+            hit = False
+            for candidate in found:
+                try:
+                    text = candidate.read_text(encoding="utf-8", errors="replace").casefold()
+                except OSError:
+                    continue
+                if any(marker.casefold() in text for marker in spec["markers"]):
+                    hit = True
+                    break
+            why = "" if hit else ("nothing in the file suggests it: looked for "
+                                  + ", ".join(spec["markers"][:3]))
+            outcome.append((item, hit, why))
         else:
             outcome.append((item, True, ""))
     return outcome

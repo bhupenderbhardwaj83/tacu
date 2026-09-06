@@ -126,10 +126,30 @@ def _python_dependency_remedy(module: str, workspace: Path,
     else:
         steps.append(_shell_step(venv_binary(target, "python"), ["-m", "pip", "install", package],
                                  f"Install {package} into the project environment"))
+    # Prove the install worked. Importing is the check that matters and it always
+    # terminates, unlike the program itself.
+    steps.append(_shell_step(venv_binary(target, "python"), ["-c", f"import {module.split('.')[0]}"],
+                             f"Confirm {package} imports in that environment"))
     if rerun is not None:
-        arguments = list((rerun.get("inputs") or {}).get("args") or [])
-        steps.append(_shell_step(venv_binary(target, "python"), arguments,
-                                 "Run it again inside the environment that now has the package"))
+        arguments = [str(item) for item in (rerun.get("inputs") or {}).get("args") or []]
+        source = ""
+        for argument in arguments:
+            candidate = workspace / argument
+            if candidate.is_file():
+                try:
+                    source = candidate.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    source = ""
+                break
+        if looks_like_a_server([venv_binary(target, "python"), *arguments], source):
+            # Waiting on something that never returns is waiting for it to crash.
+            steps.append({"tool": "shell", "operation": "run", "server": True,
+                          "inputs": {"executable": venv_binary(target, "python"),
+                                     "args": ["-c", "pass"], "cwd": "."},
+                          "purpose": server_note([venv_binary(target, "python"), *arguments])})
+        else:
+            steps.append(_shell_step(venv_binary(target, "python"), arguments,
+                                     "Run it again inside the environment that now has the package"))
     return steps
 
 
@@ -253,6 +273,36 @@ def setup_steps(intent: str, workspace: Path) -> list[dict[str, Any]]:
                 venv_binary(target, "python"), ["-m", "pip", "install", *packages],
                 f"Install {', '.join(packages)} into the environment"))
     return steps
+
+
+# A program that binds a port does not return; waiting for it to exit is waiting
+# for it to crash. These are the shapes that say "this one serves".
+_SERVER_SHAPED = re.compile(
+    r"(?i)\b(?:runserver|http\.server|SimpleHTTPServer|flask\s+run|uvicorn|gunicorn|hypercorn|"
+    r"waitress|daphne|next\s+dev|vite|nodemon|webpack\s+serve|serve\b|"
+    r"rails\s+s(?:erver)?|php\s+-S)\b")
+
+
+def looks_like_a_server(command: list[str], source: str = "") -> bool:
+    """Would running this block until something kills it?
+
+    Judged from the command and, when the file is readable, from whether it starts
+    a listener at import time.
+    """
+
+    text = " ".join(str(part) for part in command)
+    if _SERVER_SHAPED.search(text):
+        return True
+    return bool(re.search(r"(?i)(?:app\.run\(|serve_forever\(|\.listen\(|"
+                          r"uvicorn\.run\(|http\.server|createServer\()", source or ""))
+
+
+def server_note(command: list[str]) -> str:
+    """What to tell the user instead of hanging on a process that never exits."""
+
+    shown = " ".join(str(part) for part in command)
+    return (f"`{shown}` starts a server, which runs until stopped, so TACU did not wait "
+            "for it. Start it yourself in a terminal, then ask TACU what is listening.")
 
 
 def toolchain(workspace: Path) -> dict[str, Any]:

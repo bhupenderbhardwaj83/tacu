@@ -2,6 +2,28 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.6] - 2026-09-06
+
+### Added
+
+- `application.open` takes a web address, so "open google chrome and launch apple.com" is
+  one reviewed step. Addresses must be http or https and are passed as separate arguments,
+  never through a shell. The application is matched against what is installed, so "google
+  chrome" finds Google Chrome without any list of application names.
+- A request's behaviour is checked where it leaves a mark: a page asked to collect input
+  and greet the user is verified for both, not merely for existing.
+- An install is confirmed by importing the package, and a command that would run a server
+  is reported rather than waited on, since a process that never returns cannot be waited for.
+
+### Fixed
+
+- An operation that required review could never run: approval was inferred from the policy
+  level, so `application.open` refused even after the step was shown and executed. Seeing a
+  step and choosing to run it now counts as the review.
+- Host actions were ranked ahead of better matches regardless of score, so "launch
+  apple.com" was answered by `docker start`. The whole field is now ranked by score.
+- The duplicate `application.open` capability was removed.
+
 ## [0.3.5] - 2026-09-06
 
 ### Added
@@ -169,6 +191,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.3.6]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.6
 [0.3.5]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.5
 [0.3.4]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.4
 [0.3.3]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.3
