@@ -820,6 +820,50 @@ def print_backup_help() -> None:
     _more("health", "review", "clip")
 
 
+def print_migrate_help() -> None:
+    print(_heading("ti migrate — move this working copy to another computer"))
+    print(paint("WHAT: Zips the whole TACU checkout, including the files git ignores.", PALETTE.text))
+    print(paint("WHEN: New laptop, a second machine, or handing the work to someone else.", PALETTE.text))
+    print(paint("WHERE: One directory above the checkout, so the archive never packs itself.",
+                PALETTE.text))
+    _legend()
+    print()
+    print(paint("USAGE", PALETTE.violet + PALETTE.bold))
+    _entry("migrate", "ti migrate [DESCRIPTION]", "ti migrate juicy detector rewrite",
+           "Writes tacu_HHMM_IST_DD_MMM_YYYY_your-description.zip beside the checkout. The words "
+           "you give become the description in the file name.")
+    _entry("--dry-run", "ti migrate --dry-run", "ti migrate --dry-run",
+           "Shows what would travel and how large it is, largest folders first, without writing.")
+    _entry("--exclude", "ti migrate --exclude PATTERN", "ti migrate --exclude 'not_required/*'",
+           "Leaves out paths matching a glob. Repeat it for more than one.")
+    _entry("-o", "ti migrate -o FOLDER", "ti migrate -o ~/Dropbox",
+           "Writes somewhere else. A path ending in .zip is used as the file name itself.")
+    print()
+    print(paint("WHAT TRAVELS", PALETTE.violet + PALETTE.bold))
+    print(paint("  Everything in the checkout, including what .gitignore hides: not_required/, "
+                "pre_release_tests/, notes, local captures, and .git itself.", PALETTE.muted))
+    print(paint("  That is the point — a fresh clone gives you the tracked files and nothing else.",
+                PALETTE.muted))
+    print()
+    print(paint("WHAT DOES NOT", PALETTE.violet + PALETTE.bold))
+    print(paint("  Installed and generated artefacts only: .venv, node_modules, __pycache__, "
+                "build, dist, .egg-info, and the other caches.", PALETTE.muted))
+    print(paint("  The other machine rebuilds these with ./install.sh, and a macOS virtualenv "
+                "would not work on Linux anyway.", PALETTE.muted))
+    print()
+    print(paint("SAFETY", PALETTE.violet + PALETTE.bold))
+    print(paint("  Credential files (.env, *.pem, keys) are listed before the archive is written, "
+                "and the zip is created owner-only.", PALETTE.muted))
+    print(paint("  Check the size first with --dry-run: one local folder can be most of the archive.",
+                PALETTE.muted))
+    print()
+    print(paint("ON THE OTHER COMPUTER", PALETTE.violet + PALETTE.bold))
+    print(paint("  unzip tacu_….zip  ·  cd tacu_…  ·  ./install.sh", PALETTE.muted))
+    print()
+    print(paint("TRY NEXT: ti migrate --dry-run   ·   ti migrate before the rewrite", PALETTE.muted))
+    _more("backup", "doctor", "version")
+
+
 def print_inspect_help() -> None:
     print(_heading("ti inspect — colorize, no model"))
     print(paint("WHAT: Readable colorized stdout for a command you already know.", PALETTE.text))
@@ -1107,6 +1151,7 @@ _DENSE_HELP = {
     "web": print_web_help,
     "inspect": print_inspect_help,
     "backup": print_backup_help,
+    "migrate": print_migrate_help,
     "restore": print_backup_help,
     "data": print_data_help,
     "dataset": print_data_help,
@@ -1172,7 +1217,7 @@ _CHOICE_ROWS = (
 OVERVIEW_COMMANDS = (
     "ask", "web", "do", "auto", "run", "docker", "inspect", "history",
     "evidence", "copy", "clip", "syntax", "save", "extract", "juicy",
-    "data", "backup", "all", "completion", "shell-init", "version",
+    "data", "backup", "migrate", "all", "completion", "shell-init", "version",
     "models", "model", "config", "plugins", "doctor", "setup",
     "workspace", "tools", "clear",
 )
@@ -1313,6 +1358,10 @@ def print_quick_help() -> None:
            "Deletes the private retained-turn history only after the explicit --yes confirmation.")
     _entry("backup", "ti backup create|list|restore …", "ti backup create ~/Dropbox",
            "Packs every database and setting into one portable .tar.gz, and restores it after a crash.")
+    _entry("migrate", "ti migrate [DESCRIPTION] [--exclude PATTERN] [--dry-run]",
+           "ti migrate juicy detector rewrite",
+           "Packs this whole working copy — untracked files included — as one zip beside it, "
+           "so the same TACU can be rebuilt on another computer.")
     print()
 
     _zone("SETUP / SHELL")

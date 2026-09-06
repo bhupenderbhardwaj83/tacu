@@ -1677,6 +1677,101 @@ def handle_data_command(arguments: argparse.Namespace) -> int:
     raise TacuError(f"Unknown data action: {action}. Try load, list, show, head, query, search, juicy, rm, or gc.")
 
 
+def _tacu_working_copy(start: Path | None = None) -> Path:
+    """The checkout we are standing in, found the way git finds one.
+
+    Walking up beats trusting the current directory: `ti migrate` run from
+    `src/tacu` should package the project, not the package.
+    """
+
+    here = (start or Path.cwd()).resolve()
+    for candidate in (here, *here.parents):
+        if (candidate / "pyproject.toml").is_file() and (candidate / "src" / "tacu").is_dir():
+            return candidate
+        if (candidate / ".git").exists() and (candidate / "src" / "tacu").is_dir():
+            return candidate
+    return here
+
+
+def handle_migrate_command(arguments: argparse.Namespace) -> int:
+    """Package the working copy — untracked files and all — as one portable zip."""
+
+    from . import migrate as migrate_module
+
+    root = (arguments.root or _tacu_working_copy()).expanduser().resolve()
+    if not root.is_dir():
+        raise TacuError(f"{root} is not a directory.")
+    destination = (arguments.output or migrate_module.default_destination(root)).expanduser()
+    if destination.suffix.casefold() == ".zip":
+        archive = destination
+    else:
+        name = migrate_module.archive_name(" ".join(arguments.description or []))
+        archive = destination / f"{name}.zip"
+    if archive.resolve().parent == root:
+        raise TacuError(
+            "The archive would sit inside the copy it is packaging. "
+            "Pass -o with a folder outside this working copy.")
+
+    with Activity(f"reading {root.name}") as activity:
+        plan = migrate_module.plan_migration(root, archive, exclude=tuple(arguments.exclude))
+        activity.complete(f"{len(plan.files):,} file(s) · "
+                          f"{migrate_module.human_bytes(plan.total_bytes)} before compression")
+
+    print(paint(f"MIGRATE  {root}", PALETTE.bold))
+    print(paint(f"  archive: {archive}", PALETTE.muted))
+    for name, size in plan.largest:
+        print(paint(f"    {migrate_module.human_bytes(size):>9}  {name}", PALETTE.muted))
+    if plan.skipped_dirs:
+        shown = ", ".join(sorted({Path(item).name for item in plan.skipped_dirs})[:8])
+        print(paint(
+            f"  rebuilt there: {migrate_module.human_bytes(plan.skipped_bytes)} of installed "
+            f"and generated files left behind ({shown})", PALETTE.muted))
+    if plan.excluded_dirs:
+        print(paint(f"  you excluded: {migrate_module.human_bytes(plan.excluded_bytes)} · "
+                    + ", ".join(plan.excluded_dirs[:4]), PALETTE.muted))
+    # One folder can be most of the archive without being source. Say which, so
+    # the choice to carry it is made on purpose rather than by default.
+    if plan.largest and plan.total_bytes > 100 * 1024 * 1024:
+        name, size = plan.largest[0]
+        if size > plan.total_bytes * 0.5:
+            print(paint(
+                f"  note: {name} is {migrate_module.human_bytes(size)} of the "
+                f"{migrate_module.human_bytes(plan.total_bytes)} total. If it is not needed "
+                f"on the other machine: --exclude '{name}/*' --exclude '{name}'",
+                PALETTE.yellow))
+    if plan.sensitive:
+        # The tree is copied in the clear. Say so plainly rather than quietly
+        # shipping someone's keys into a folder they may sync or share.
+        print(paint(f"  ⚠  {len(plan.sensitive)} credential file(s) will travel in the clear:",
+                    PALETTE.yellow + PALETTE.bold))
+        for item in plan.sensitive[:6]:
+            print(paint(f"       {item}", PALETTE.yellow))
+        if len(plan.sensitive) > 6:
+            print(paint(f"       … and {len(plan.sensitive) - 6} more", PALETTE.yellow))
+        print(paint("     The zip is written owner-only. Exclude them with "
+                    "--exclude '*.pem' if this copy is going somewhere shared.",
+                    PALETTE.yellow))
+    if arguments.dry_run:
+        print(paint("DRY RUN · nothing was written.", PALETTE.green + PALETTE.bold))
+        return 0
+
+    with Activity(f"writing {archive.name}") as activity:
+        def progress(done: int, total: int, current: str) -> None:
+            if done % 200 == 0 or done == total:
+                activity.update(f"{done:,}/{total:,} · {current[:48]}")
+
+        migrate_module.write_archive(plan, on_progress=progress)
+        activity.complete(f"wrote {migrate_module.human_bytes(archive.stat().st_size)}")
+
+    print(paint(f"Migration archive → {archive}", PALETTE.green + PALETTE.bold))
+    print(paint(f"  {len(plan.files):,} file(s) · "
+                f"{migrate_module.human_bytes(archive.stat().st_size)} compressed "
+                f"from {migrate_module.human_bytes(plan.total_bytes)}", PALETTE.muted))
+    print(paint(f"  on the other machine: unzip {archive.name} && cd {archive.stem} "
+                f"&& ./install.sh", PALETTE.muted))
+    return 0
+
+
 def handle_backup_command(arguments: argparse.Namespace) -> int:
     """ti backup create | list | show | restore."""
 
@@ -3597,6 +3692,31 @@ def parser() -> argparse.ArgumentParser:
     backup_restore.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     backup_restore.add_argument("--no-safety-copy", action="store_true",
                                 help="do not snapshot current state before restoring")
+    migrate_parser = command_parser(
+        "migrate",
+        "package this whole working copy — untracked files included — as one zip beside it",
+        "ti migrate juicy detector rewrite",
+    )
+    migrate_parser.add_argument(
+        "description", nargs="*",
+        help="a few words about this snapshot; they become part of the file name",
+    )
+    migrate_parser.add_argument(
+        "-o", "--output", type=Path,
+        help="folder to write into; defaults to one directory above this working copy",
+    )
+    migrate_parser.add_argument(
+        "--exclude", action="append", default=[], metavar="PATTERN",
+        help="also leave out paths matching this glob; repeatable",
+    )
+    migrate_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="show what would travel, and how large it is, without writing anything",
+    )
+    migrate_parser.add_argument(
+        "--root", type=Path,
+        help="working copy to package; defaults to the TACU checkout you are in",
+    )
     tutorial_parser = command_parser("all", "open the full capability tutorial", "ticu all", aliases=["tutorial", "guide"])
     tutorial_parser.add_argument("topic", nargs="?", help="optional deep-dive topic")
     completion_parser = command_parser(
@@ -4363,6 +4483,8 @@ def _main(argv: list[str] | None = None) -> int:
         if arguments.subcommand == "shell-init":
             print(shell_initialization(arguments.shell))
             return 0
+        if arguments.subcommand == "migrate":
+            return handle_migrate_command(arguments)
         if arguments.subcommand == "backup":
             # Must run before HistoryStore opens: restore replaces history.db itself.
             return handle_backup_command(arguments)

@@ -2,6 +2,28 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.11] - 2026-09-06
+
+### Added
+
+- `ti migrate` packages this whole working copy as one zip beside it, so the same
+  TACU can be rebuilt on another computer. The archive is named
+  `tacu_HHMM_IST_DD_MMM_YYYY_your-description.zip` and lands one directory above
+  the checkout, never inside the copy it is packaging.
+- What travels is everything in the tree, including what `.gitignore` hides:
+  `not_required/`, `pre_release_tests/`, local notes, captures and `.git` itself.
+  That is the point — a fresh clone gives you the tracked files and nothing else.
+- What stays behind is only what the other machine rebuilds for itself: `.venv`,
+  `node_modules`, `__pycache__`, `build`, `dist`, `*.egg-info` and the other
+  caches. A macOS virtualenv would not work on Linux anyway.
+- `--dry-run` shows what would travel and how large it is, largest folders first.
+  When one folder is more than half the archive it is named, with the `--exclude`
+  line that would drop it, so carrying it is a decision rather than a default.
+- `--exclude PATTERN` (repeatable) leaves out paths, and `-o` writes elsewhere.
+  Credential files (`.env`, `*.pem`, keys) are listed before anything is written,
+  and the zip is created owner-only, because a working copy carries them in the
+  clear and the archive usually lands in a synced folder.
+
 ## [0.3.10] - 2026-09-06
 
 ### Changed
