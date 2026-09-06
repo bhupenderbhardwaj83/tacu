@@ -6,6 +6,14 @@ All notable TACU changes are documented here. TACU follows [semantic versioning]
 
 ### Added
 
+- Pushing a version tag now publishes a GitHub release. `.github/workflows/release.yml`
+  takes the notes from this file's section for that version, refuses to publish when
+  the section is missing or when the tag disagrees with `src/tacu/__init__.py`, and
+  creates the release from the tag. Nothing publishes from a branch, so a release
+  stays a deliberate act: `git push origin v0.3.11`.
+- The README carries a version badge that reads the latest published release, so it
+  cannot drift from the real version the way a hand-written number does.
+
 - `ti migrate` packages this whole working copy as one zip beside it, so the same
   TACU can be rebuilt on another computer. The archive is named
   `tacu_HHMM_IST_DD_MMM_YYYY_your-description.zip` and lands one directory above

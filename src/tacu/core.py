@@ -95,6 +95,35 @@ def release_history() -> list[tuple[str, str, list[str]]]:
     return releases
 
 
+def release_notes(version: str) -> str:
+    """The CHANGELOG section for one version, exactly as it was written.
+
+    `release_history` flattens bullets so the terminal can print them; a release
+    page wants the markdown as authored, subheadings and all. Returns an empty
+    string when that version has no section, so a caller can say so rather than
+    publish an empty release.
+    """
+
+    candidates = [Path(__file__).with_name("CHANGELOG.md"),
+                  Path(__file__).resolve().parents[2] / "CHANGELOG.md"]
+    source = next((item for item in candidates if item.is_file()), None)
+    if source is None:
+        return ""
+    wanted = (version or "").strip().lstrip("vV")
+    collected: list[str] = []
+    inside = False
+    for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+        heading = re.match(r"^##\s+\[([^\]]+)\]", line)
+        if heading:
+            if inside:
+                break
+            inside = heading.group(1).strip() == wanted
+            continue
+        if inside:
+            collected.append(line)
+    return "\n".join(collected).strip()
+
+
 def local_time_context(now: datetime | None = None) -> str:
     """Ground the model in this machine's own clock so "today" is never guessed.
 

@@ -210,5 +210,43 @@ class CommandTests(unittest.TestCase):
             self.assertNotEqual(code, 0)
 
 
+class ReleaseNotesTests(unittest.TestCase):
+    """The release workflow publishes whatever this returns, so it is tested."""
+
+    def test_the_section_for_a_version_comes_back_as_written(self) -> None:
+        from tacu.core import release_notes
+
+        notes = release_notes("0.3.11")
+        self.assertIn("ti migrate", notes)
+        self.assertIn("### Added", notes)
+        # It must stop at the next release, not run to the end of the file.
+        self.assertNotIn("0.3.10", notes)
+
+    def test_a_leading_v_is_accepted_because_tags_carry_one(self) -> None:
+        from tacu.core import release_notes
+
+        self.assertEqual(release_notes("v0.3.11"), release_notes("0.3.11"))
+
+    def test_an_unknown_version_returns_nothing_rather_than_guessing(self) -> None:
+        from tacu.core import release_notes
+
+        self.assertEqual(release_notes("9.9.9"), "")
+
+    def test_every_released_version_has_notes_to_publish(self) -> None:
+        from tacu.core import release_history, release_notes
+
+        for version, _date, _bullets in release_history():
+            with self.subTest(version=version):
+                self.assertTrue(release_notes(version).strip(), version)
+
+    def test_the_shipped_version_is_documented(self) -> None:
+        # The release workflow refuses to publish a tag whose section is missing.
+        import tacu
+        from tacu.core import release_notes
+
+        self.assertTrue(release_notes(tacu.__version__).strip(),
+                        f"CHANGELOG.md has no section for {tacu.__version__}")
+
+
 if __name__ == "__main__":
     unittest.main()

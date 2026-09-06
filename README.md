@@ -2,6 +2,16 @@
   <img src="assets/brand/tacu-logo.png" width="180" alt="TACU terminal companion logo">
 </p>
 
+<p align="center">
+  <a href="https://github.com/bhupenderbhardwaj83/tacu/releases/latest"><img
+    src="https://img.shields.io/github/v/release/bhupenderbhardwaj83/tacu?label=version&color=blue"
+    alt="Latest TACU release"></a>
+  <a href="https://github.com/bhupenderbhardwaj83/tacu/blob/main/LICENSE"><img
+    src="https://img.shields.io/github/license/bhupenderbhardwaj83/tacu?color=blue"
+    alt="MIT licensed"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Requires Python 3.11 or newer">
+</p>
+
 # TACU
 
 **Terminal Ally & Companion Unit** is a local-first AI harness that turns terminal output, host telemetry, security evidence, and large files into focused, actionable answers.
