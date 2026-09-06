@@ -36,7 +36,8 @@ from .automation import (
     MAX_AUTONOMOUS_STEPS, CommandStep, command_from_text, create_plan, evaluate_policy,
     native_instead_of_shell, _step_from_capability,
 )
-from . import diagnose
+from . import acceptance, diagnose
+from dataclasses import replace
 from .companion import exact_answer, exact_host_answer
 from .loop import (
     MAX_AI_TURNS, MAX_COGNITIVE_TURNS, answer_needs_refine,
@@ -2985,6 +2986,29 @@ def _clarify_host_mutate_target(intent: str, workspace: Path) -> str | None:
 
 
 
+_SCRIPTY = (".sh", ".bash", ".zsh", ".command")
+
+
+def _plan_only_writes_a_script(plan: Any) -> bool:
+    """True when every step just writes a shell script, which is a dodge here."""
+
+    steps = list(getattr(plan, "steps", ()) or ())
+    if not steps:
+        return False
+    for step in steps:
+        if getattr(step, "native_tool", None) not in {"write_file", "filesystem"}:
+            return False
+        raw = getattr(step, "native_inputs", None) or "{}"
+        try:
+            inputs = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        except (ValueError, TypeError):
+            return False
+        target = str(inputs.get("path") or inputs.get("name") or "")
+        if not target.endswith(_SCRIPTY):
+            return False
+    return True
+
+
 def _step_fingerprint(step: Any) -> str:
     """Identity of an attempt, so the loop can refuse to repeat one.
 
@@ -3088,6 +3112,14 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
             print(paint("NON-INTERACTIVE AUTO · every planned step is SAFE", PALETTE.green + PALETTE.bold))
 
     before = snapshot_edit_targets(intent, workspace)
+    # Setting up an environment or installing a dependency is work to do, not a
+    # script to hand back. Doing it beats emitting something the user must debug.
+    setup = diagnose.setup_steps(intent, workspace)
+    if setup and _plan_only_writes_a_script(plan):
+        plan = replace(plan, steps=tuple(_step_from_capability(item) for item in setup))
+        if _verbose_ui():
+            print(paint("  plan · doing this directly instead of writing a script",
+                        PALETTE.muted))
     results = _execute_intent_steps(plan.steps, workspace=workspace, timeout=arguments.timeout,
                                     autonomous=autonomous)
     if results is None:
@@ -3102,8 +3134,19 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
                 results = merge_results(results, extra)
         model_replans = 0
         attempted = {_step_fingerprint(step) for step in plan.steps}
-        for turn in range(1, MAX_COGNITIVE_TURNS + 1):
+        # What the request actually claimed, so "done" is decided by looking rather
+        # than by the last exit code. A longer-horizon task earns more turns; it
+        # cannot loop, because an attempt is never repeated.
+        criteria = acceptance.criteria_for(intent)
+        budget = MAX_COGNITIVE_TURNS + (2 if criteria else 0)
+        for turn in range(1, budget + 1):
             failure = critique_goal(intent, results, workspace=workspace, before=before)
+            if not failure and criteria:
+                missing = acceptance.unmet(criteria, workspace)
+                if missing:
+                    describes, why = missing[0][0].describes, missing[0][1]
+                    print(paint(f"  check · {describes} — {why}", PALETTE.muted))
+                    failure = f"unmet: {describes}"
             if not failure:
                 break
             # Read the error before deciding anything: a diagnosable failure has a
@@ -3154,6 +3197,13 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
             if not extra:
                 break
             results = merge_results(results, extra)
+        # Say plainly which of the request's claims hold now, including any that do
+        # not: a report that only mentions successes is not a report.
+        if criteria:
+            verdict = acceptance.check(criteria, workspace)
+            if any(not met for _item, met, _why in verdict):
+                print(paint("CHECK", PALETTE.accent + PALETTE.bold))
+                print(paint(acceptance.summarise(verdict), PALETTE.muted))
 
     if results:
         source = "auto" if autonomous else "do"

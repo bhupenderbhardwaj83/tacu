@@ -2,6 +2,28 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.5] - 2026-09-06
+
+### Added
+
+- A request's checkable claims are extracted and verified against the workspace, so "done"
+  is decided by looking rather than by the last exit code. Asking for an index file and
+  receiving a Flask app is now reported as unmet, with a CHECK summary listing what holds
+  and what does not.
+- Setting up an environment or installing a dependency is carried out instead of being
+  handed back as a shell script. A tool the user names outranks both the lockfile and any
+  preference, and a request whose ecosystem cannot be established proposes nothing rather
+  than guessing.
+- `diagnose.toolchain` reports which interpreters and package managers are actually present
+  and which one this project would use.
+
+### Changed
+
+- A task carrying acceptance criteria gets a larger turn budget. Extra turns are safe
+  because an attempt is never repeated.
+- Installs call the environment's own `python -m pip`, so a machine with `pip3` and no
+  `pip` behaves the same as any other.
+
 ## [0.3.4] - 2026-09-06
 
 ### Fixed
@@ -147,6 +169,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.3.5]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.5
 [0.3.4]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.4
 [0.3.3]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.3
 [0.3.2]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.2

@@ -139,6 +139,144 @@ def _node_dependency_remedy(module: str, workspace: Path) -> list[dict[str, Any]
                         f"Install {module} with {installer['tool']} ({installer['reason']})")]
 
 
+# "install flask", "add requests and httpx", "set up a virtual environment"
+_INSTALL_REQUEST = re.compile(
+    r"(?:\binstall\b|\badd\b|\bset ?up\b)\s+(?:the\s+)?(?:packages?\s+|deps?\s+|dependenc(?:y|ies)\s+)?"
+    r"([A-Za-z0-9_.@/+-]+(?:\s*(?:,|and)\s*[A-Za-z0-9_.@/+-]+)*)",
+    re.I)
+_ENVIRONMENT_REQUEST = re.compile(
+    r"\b(?:virtual ?env(?:ironment)?|venv|virtualenv|isolated environment)\b", re.I)
+_NODE_HINT = re.compile(r"\b(?:node|npm|pnpm|yarn|javascript|typescript|package\.json)\b", re.I)
+_PYTHON_HINT = re.compile(r"\b(?:python|pip|pip3|venv|virtualenv|uv|poetry|pipenv)\b", re.I)
+# Words that follow "install" but are not packages.
+_NOT_A_PACKAGE = frozenset((
+    "it", "them", "this", "that", "the", "a", "an", "and", "then", "please", "also",
+    "dependencies", "dependency", "packages", "package", "requirements", "everything",
+    "all", "modules", "module", "libraries", "library", "env", "environment", "venv",
+    "virtualenv", "virtual", "into", "in", "to", "for", "with", "using", "via",
+))
+
+
+def _packages_from(intent: str) -> list[str]:
+    match = _INSTALL_REQUEST.search(intent or "")
+    if not match:
+        return []
+    names: list[str] = []
+    for part in re.split(r"\s*(?:,|and)\s*", match.group(1)):
+        candidate = part.strip().strip(".,")
+        if candidate and candidate.casefold() not in _NOT_A_PACKAGE:
+            names.append(candidate)
+    return names
+
+
+_NAMED_TOOL = re.compile(r"\b(npm|pnpm|yarn|bun|pip3?|uv|poetry|pipenv)\b", re.I)
+
+
+def named_tool(intent: str) -> str:
+    """A tool the user named explicitly. Their choice outranks any preference."""
+
+    match = _NAMED_TOOL.search(intent or "")
+    return match.group(1).lower() if match else ""
+
+
+def _ecosystem(intent: str, workspace: Path) -> str:
+    """Which toolchain this is about, from the words first and the project second.
+
+    Returns "" when neither says, because installing a node package with pip fails
+    in a way that is harder to understand than admitting we cannot tell.
+    """
+
+    if _NODE_HINT.search(intent or ""):
+        return "node"
+    # Asking for a virtual environment is asking for Python, whatever words are used.
+    if _PYTHON_HINT.search(intent or "") or _ENVIRONMENT_REQUEST.search(intent or ""):
+        return "python"
+    if (workspace / "package.json").exists():
+        return "node"
+    if any((workspace / name).exists() for name in
+           ("pyproject.toml", "requirements.txt", "setup.py", "Pipfile")):
+        return "python"
+    if existing_venv(workspace):
+        return "python"
+    # Last resort: what the project is written in.
+    try:
+        names = [item.name for item in workspace.iterdir() if item.is_file()]
+    except OSError:
+        return ""
+    if any(name.endswith(".py") for name in names):
+        return "python"
+    if any(name.endswith((".js", ".mjs", ".ts", ".tsx")) for name in names):
+        return "node"
+    return ""
+
+
+def setup_steps(intent: str, workspace: Path) -> list[dict[str, Any]]:
+    """Turn "create a venv and install flask" into steps that do it.
+
+    Emitting a shell script for this is a dodge: the script still has to be made
+    executable and run, and the activation line inside it cannot work anyway.
+    """
+
+    wants_environment = bool(_ENVIRONMENT_REQUEST.search(intent or ""))
+    packages = _packages_from(intent)
+    if not wants_environment and not packages:
+        return []
+    ecosystem = _ecosystem(intent, workspace)
+    if not ecosystem:
+        return []
+    chosen = named_tool(intent)
+    if ecosystem == "node":
+        if not packages:
+            return []
+        installer = ({"tool": chosen, "reason": "you named it"}
+                     if chosen in {"npm", "pnpm", "yarn", "bun"} else node_installer(workspace))
+        return [_shell_step(installer["tool"], ["install", *packages],
+                            f"Install {', '.join(packages)} with {installer['tool']} "
+                            f"({installer['reason']})")]
+
+    venv = existing_venv(workspace)
+    target = venv or (workspace / ".venv")
+    steps: list[dict[str, Any]] = []
+    if venv is None:
+        steps.append(_shell_step("python3", ["-m", "venv", ".venv"],
+                                 "Create an isolated environment for this project"))
+    if packages:
+        installer = ({"tool": "uv", "reason": "you named it"} if chosen == "uv"
+                     else {"tool": "pip", "reason": "you named it"} if chosen in {"pip", "pip3"}
+                     else python_installer(workspace, venv))
+        if installer["tool"] == "uv":
+            steps.append(_shell_step(
+                "uv", ["pip", "install", "--python", venv_binary(target, "python"), *packages],
+                f"Install {', '.join(packages)} into the environment with uv"))
+        else:
+            steps.append(_shell_step(
+                venv_binary(target, "python"), ["-m", "pip", "install", *packages],
+                f"Install {', '.join(packages)} into the environment"))
+    return steps
+
+
+def toolchain(workspace: Path) -> dict[str, Any]:
+    """What is actually available here, and what this project would use.
+
+    Reported rather than assumed: a machine with pip3 but no pip, or pnpm but a
+    package-lock.json, behaves differently and the answer should say so.
+    """
+
+    present = {name: shutil.which(name) for name in
+               ("python3", "python", "pip", "pip3", "uv", "poetry", "pipenv",
+                "node", "npm", "pnpm", "yarn", "bun")}
+    venv = existing_venv(workspace)
+    return {
+        "available": {name: path for name, path in present.items() if path},
+        "missing": sorted(name for name, path in present.items() if not path),
+        "virtualenv": str(venv) if venv else "",
+        "python_installer": python_installer(workspace, venv),
+        "node_installer": node_installer(workspace),
+        "note": ("Installs use the environment's own python -m pip, so whether the "
+                 "system calls it pip or pip3 never matters."),
+    }
+
+
 def failure_text(results: list[dict[str, Any]]) -> str:
     """Everything a failed step said, newest last."""
 

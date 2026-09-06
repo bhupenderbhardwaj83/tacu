@@ -179,3 +179,68 @@ class FailureReadingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SetupInsteadOfScriptTests(unittest.TestCase):
+    """Setting up an environment is work to do, not a script to hand back."""
+
+    def _workspace(self, *files: str):
+        keep = tempfile.TemporaryDirectory()
+        workspace = Path(keep.name)
+        for name in files:
+            (workspace / name).write_text("{}")
+        return keep, workspace
+
+    def test_a_venv_request_produces_steps_that_run(self) -> None:
+        keep, workspace = self._workspace()
+        steps = diagnose.setup_steps(
+            "please create a virtual environment activate it and then install flask", workspace)
+        rendered = json.dumps(steps)
+        self.assertTrue(steps)
+        self.assertIn("venv", rendered)
+        self.assertIn("flask", rendered)
+        self.assertNotIn(".sh", rendered, "it must not fall back to writing a script")
+        self.assertNotIn("activate", rendered)
+        keep.cleanup()
+
+    def test_a_tool_the_user_names_is_the_tool_used(self) -> None:
+        keep, workspace = self._workspace("package.json", "pnpm-lock.yaml")
+        steps = diagnose.setup_steps("npm install express", workspace)
+        self.assertEqual(steps[0]["inputs"]["executable"], "npm",
+                         "an explicit choice outranks the lockfile and any preference")
+        keep.cleanup()
+
+    def test_an_unclear_ecosystem_proposes_nothing(self) -> None:
+        keep, workspace = self._workspace()
+        self.assertEqual(diagnose.setup_steps("add lodash to the project", workspace), [])
+        keep.cleanup()
+
+    def test_the_project_language_settles_an_unclear_request(self) -> None:
+        keep, workspace = self._workspace("package.json")
+        steps = diagnose.setup_steps("add lodash to the project", workspace)
+        self.assertTrue(steps)
+        self.assertIn(steps[0]["inputs"]["executable"], {"npm", "pnpm", "yarn"})
+        keep.cleanup()
+
+    def test_a_plain_question_is_not_treated_as_an_install(self) -> None:
+        keep, workspace = self._workspace("pyproject.toml")
+        self.assertEqual(diagnose.setup_steps("which process is using most cpu", workspace), [])
+        keep.cleanup()
+
+
+class ToolchainDiscoveryTests(unittest.TestCase):
+    def test_it_reports_what_is_present_and_what_is_not(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            found = diagnose.toolchain(Path(directory))
+        self.assertIn("available", found)
+        self.assertIn("missing", found)
+        self.assertIn("tool", found["python_installer"])
+        self.assertIn("tool", found["node_installer"])
+
+    def test_pip_versus_pip3_never_decides_anything(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            steps = diagnose.remedy(MISSING_FLASK, workspace, None)
+        rendered = json.dumps(steps)
+        self.assertNotIn('"pip3"', rendered)
+        self.assertNotIn('"executable": "pip"', rendered)
