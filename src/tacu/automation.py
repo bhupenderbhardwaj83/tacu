@@ -172,6 +172,38 @@ def _named_item(intent: str) -> tuple[str, str] | None:
     return (kind, name) if name and len(name) <= 255 else None
 
 
+# A model asked for several commands often writes them as one string joined by
+# && or ;, handed to a shell as a single argument. A shell reads that argument as
+# a file name and exits 127, so the whole plan stops on a command that was never
+# run. Splitting it into one step per command keeps every step argv-safe and
+# actually executes what was asked for.
+_COMPOUND_SPLIT = re.compile(r"\s*(?:&&|;|\|\|)\s*")
+_SHELL_NAMES = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
+
+
+def _split_compound_shell_step(step: CommandStep) -> list[CommandStep]:
+    """One shell string holding several commands becomes several steps."""
+
+    if Path(step.executable).name.casefold() not in _SHELL_NAMES:
+        return [step]
+    payload = [arg for arg in step.args if arg not in {"--", "-c", "-lc", "-l"}]
+    if len(payload) != 1:
+        return [step]
+    parts = [part.strip() for part in _COMPOUND_SPLIT.split(payload[0]) if part.strip()]
+    if len(parts) < 2:
+        return [step]
+    produced: list[CommandStep] = []
+    for part in parts:
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            return [step]
+        if not words:
+            continue
+        produced.append(CommandStep(words[0], tuple(words[1:]), step.cwd, step.purpose))
+    return produced or [step]
+
+
 def _adapt_computer_search(step: CommandStep, workspace: Path, intent: str) -> CommandStep:
     """Normalize whole-computer name searches instead of trusting model command syntax."""
 
@@ -957,8 +989,9 @@ def _plan_from_shell_payload(payload: dict[str, Any], intent: str, workspace: Pa
         if len(args) > 100 or sum(len(arg) for arg in args) > 20_000:
             raise TacuError(f"Plan step {index} is too large. Nothing was executed.")
         step = CommandStep(executable.strip(), tuple(args), cwd, purpose.strip())
-        adapted = _adapt_computer_search(step, workspace, intent)
-        steps.append(_rewrite_incompatible_step(adapted, intent))
+        for piece in _split_compound_shell_step(step):
+            adapted = _adapt_computer_search(piece, workspace, intent)
+            steps.append(_rewrite_incompatible_step(adapted, intent))
     steps = _collapse_native_site_steps(steps)
     return CommandPlan(str(payload.get("summary") or intent), tuple(steps), raw)
 
@@ -974,11 +1007,37 @@ def command_from_text(text: str, previous: CommandStep) -> CommandStep:
 
 
 def _inside(path: Path, root: Path) -> bool:
+    """Is this path within the workspace, as written or as it resolves?
+
+    A venv's `bin/python` is a symlink to the interpreter that built it, so
+    resolving it lands in /opt or /usr and the file the user is plainly pointing
+    at inside their own project gets reported as outside it. Judge the written
+    path too, and treat either answer as inside.
+    """
+
     try:
-        resolved, workspace = path.resolve(strict=False), root.resolve(strict=False)
-        return resolved == workspace or workspace in resolved.parents
+        workspace = root.resolve(strict=False)
     except OSError:
         return False
+    candidates = []
+    try:
+        candidates.append(path.resolve(strict=False))
+    except OSError:
+        pass
+    # The path as given, normalised without following any link.
+    try:
+        literal = path.expanduser()
+        candidates.append(literal if literal.is_absolute() else (workspace / literal))
+    except (OSError, ValueError):
+        pass
+    for candidate in candidates:
+        try:
+            normalised = Path(os.path.normpath(candidate))
+        except (OSError, ValueError):
+            continue
+        if normalised == workspace or workspace in normalised.parents:
+            return True
+    return False
 
 
 def _working_directory(step: CommandStep, workspace: Path) -> Path:

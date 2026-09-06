@@ -48,7 +48,8 @@ from .harness import (
     correction_from_failure, critique_goal, format_critic_evidence, snapshot_edit_targets,
 )
 from .routing import (
-    HOST_MUTATE_KEYS, directory_target_from_intent, extract_file_write, intent_mutates_workspace,
+    HOST_MUTATE_KEYS, capability_risk, directory_target_from_intent, extract_file_write,
+    intent_mutates_workspace,
     is_shell_cd_intent, intent_host_domain, intent_is_explanatory, intent_wants_host_mutate,
     native_steps_for_intent,
 )
@@ -3015,6 +3016,22 @@ def _exact_named_path_answer(intent: str, results: list[dict[str, Any]]) -> str 
     return "\n".join(lines)
 
 
+def _step_only_looks(step: Any, workspace: Path) -> bool:
+    """Is this step pure observation — nothing to approve, nothing to undo?
+
+    The policy level is not enough on its own. `application.open` is classed
+    SAFE because it starts nothing dangerous, yet the tool itself asks for
+    explicit review; treating it as read-only skipped the review that would
+    have granted it and left the step impossible to run at all.
+    """
+
+    if not getattr(step, "is_native", False):
+        return False
+    if not evaluate_policy(step, workspace).autonomous:
+        return False
+    return capability_risk(step.native_tool or "", step.native_operation or "") == "read"
+
+
 def _execute_intent_steps(steps: tuple[Any, ...] | list[Any], *, workspace: Path, timeout: int,
                           autonomous: bool, start_index: int = 1) -> list[dict[str, Any]] | None:
     results: list[dict[str, Any]] = []
@@ -3225,7 +3242,7 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
     # TACU harder to use without making anything safer. Anything the policy will
     # not run unattended, including sensitive paths, is still reviewed.
     read_only_plan = bool(plan.steps) and all(
-        evaluate_policy(step, workspace).autonomous for step in plan.steps)
+        _step_only_looks(step, workspace) for step in plan.steps)
     if not sys.stdin.isatty() and not read_only_plan:
         if not autonomous:
             raise TacuError("Reviewed execution choices require an interactive terminal. Use ti do --dry-run here.")

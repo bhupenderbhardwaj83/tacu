@@ -161,9 +161,26 @@ def _node_dependency_remedy(module: str, workspace: Path) -> list[dict[str, Any]
 
 # "install flask", "add requests and httpx", "set up a virtual environment"
 _INSTALL_REQUEST = re.compile(
-    r"(?:\binstall\b|\badd\b|\bset ?up\b)\s+(?:the\s+)?(?:packages?\s+|deps?\s+|dependenc(?:y|ies)\s+)?"
+    r"(?:\binstall(?:ing|s)?\b|\badd(?:ing|s)?\b|\bset(?:ting)? ?up\b)\s+(?:the\s+)?"
+    r"(?:required\s+|requried\s+|necessary\s+|all\s+)?"
+    r"(?:packages?\s+|deps?\s+|dependenc(?:y|ies)\s+)?"
     r"([A-Za-z0-9_.@/+-]+(?:\s*(?:,|and)\s*[A-Za-z0-9_.@/+-]+)*)",
     re.I)
+# "install the required dependencies" names nothing. An engineer reads the
+# project instead: a requirements file says exactly what to install, and failing
+# that the framework the request is about is named in the request itself.
+_DEPS_WITHOUT_NAMES = re.compile(
+    r"(?i)\b(?:required|requried|necessary|all|the|its|it\'?s)?\s*"
+    r"(?:dependenc(?:y|ies)|requirements?|packages?|modules?|libraries)\b")
+_FRAMEWORK_IN_INTENT = re.compile(
+    r"(?i)\b([a-z][a-z0-9_.-]{2,30})\s+(?:application|app|project|server|api|service|site)\b")
+# Words that sit in front of "application" without being a package.
+_NOT_A_FRAMEWORK = frozenset((
+    "the", "this", "that", "a", "an", "my", "our", "your", "web", "new", "existing",
+    "same", "whole", "entire", "python", "node", "simple", "small", "little", "single",
+    "default", "main", "local", "sample", "example", "test", "demo", "current",
+))
+REQUIREMENT_FILES = ("requirements.txt", "requirements-dev.txt", "pyproject.toml", "Pipfile")
 _ENVIRONMENT_REQUEST = re.compile(
     r"\b(?:virtual ?env(?:ironment)?|venv|virtualenv|isolated environment)\b", re.I)
 _NODE_HINT = re.compile(r"\b(?:node|npm|pnpm|yarn|javascript|typescript|package\.json)\b", re.I)
@@ -187,6 +204,40 @@ def _packages_from(intent: str) -> list[str]:
         if candidate and candidate.casefold() not in _NOT_A_PACKAGE:
             names.append(candidate)
     return names
+
+
+def framework_from_intent(intent: str) -> str:
+    """The thing the request is about: "a flask application" is about flask."""
+
+    for match in _FRAMEWORK_IN_INTENT.finditer(intent or ""):
+        name = match.group(1).casefold()
+        if name not in _NOT_A_FRAMEWORK and name not in _NOT_A_PACKAGE:
+            return name
+    return ""
+
+
+def requirement_file(workspace: Path) -> str:
+    """A file that already says what this project needs, if there is one."""
+
+    for name in REQUIREMENT_FILES:
+        if (workspace / name).is_file():
+            return name
+    return ""
+
+
+def implied_packages(intent: str, workspace: Path) -> list[str]:
+    """What "install the dependencies" means here, when nothing is named.
+
+    An engineer looks at the project before guessing: a requirements file is the
+    answer when one exists, and otherwise the request itself names the framework.
+    """
+
+    if not _DEPS_WITHOUT_NAMES.search(intent or ""):
+        return []
+    if requirement_file(workspace):
+        return []           # handled as -r, not as a package list
+    framework = framework_from_intent(intent)
+    return [framework] if framework else []
 
 
 _NAMED_TOOL = re.compile(r"\b(npm|pnpm|yarn|bun|pip3?|uv|poetry|pipenv)\b", re.I)
@@ -239,7 +290,12 @@ def setup_steps(intent: str, workspace: Path) -> list[dict[str, Any]]:
 
     wants_environment = bool(_ENVIRONMENT_REQUEST.search(intent or ""))
     packages = _packages_from(intent)
-    if not wants_environment and not packages:
+    requirements = ""
+    if not packages:
+        # "install the required dependencies" names nothing; read the project.
+        requirements = requirement_file(workspace) if _DEPS_WITHOUT_NAMES.search(intent or "") else ""
+        packages = implied_packages(intent, workspace)
+    if not wants_environment and not packages and not requirements:
         return []
     ecosystem = _ecosystem(intent, workspace)
     if not ecosystem:
@@ -260,7 +316,13 @@ def setup_steps(intent: str, workspace: Path) -> list[dict[str, Any]]:
     if venv is None:
         steps.append(_shell_step("python3", ["-m", "venv", ".venv"],
                                  "Create an isolated environment for this project"))
-    if packages:
+    if requirements:
+        # The project already says what it needs; installing it by name would be
+        # guessing at a list that is written down.
+        steps.append(_shell_step(
+            venv_binary(target, "python"), ["-m", "pip", "install", "-r", requirements],
+            f"Install everything {requirements} asks for, into the environment"))
+    elif packages:
         installer = ({"tool": "uv", "reason": "you named it"} if chosen == "uv"
                      else {"tool": "pip", "reason": "you named it"} if chosen in {"pip", "pip3"}
                      else python_installer(workspace, venv))

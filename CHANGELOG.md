@@ -2,6 +2,44 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.12] - 2026-09-06
+
+### Fixed
+
+- A build request was read as a request to launch an application. "start that flask
+  application after creating a virtual environment" became
+  `application(open, name=that flask application after creating a virtual environment)`,
+  which `ti auto` refused, `ti ask` refused with the same words, and `ti do` planned
+  and then rejected as needing review — three verbs, three dead ends, on an ordinary
+  task. An application name is now a few words with no verbs or prepositions in them,
+  and a request that mentions creating, installing or a virtual environment is work to
+  do rather than something already on the machine.
+- `ti do` could not run `application.open` at all. The read-only fast path added in
+  0.3.9 treated the step as needing no review because the policy calls it safe, which
+  skipped the review the tool itself asks for and left the operation impossible. Only
+  a step whose capability is declared read-risk now skips review.
+- A build request was answered with a host fact. "create a venv and start the app"
+  returned the current working directory, because host read tools outscored everything
+  else and the planner was never offered anything that could build. Those tools are now
+  withheld from a build request, and writing a file and running a command are offered
+  instead — `write_file` scored zero on a request to create a file.
+- "installing required dependencies" installed nothing: `\binstall\b` did not match
+  "installing", and the phrase names no package. The project is read instead — a
+  requirements file is installed with `-r`, and failing that the framework named in the
+  request is what gets installed, so "for flask application" installs flask.
+- A file inside the workspace was reported as outside it. A venv's `bin/python` is a
+  symlink to the interpreter that built it, so resolving it landed in `/opt` and the
+  project's own binary needed permission. The written path is now judged as well as the
+  resolved one; traversal out of the workspace is still refused.
+- Several commands written as one string — `python3 -m venv venv && ./venv/bin/pip
+  install -r requirements.txt` — were handed to a shell as a single argument, which the
+  shell read as a file name and exited 127, stopping the plan on a command that never
+  ran. A compound command becomes one step per command, each still argv-safe.
+- "ensure index.html is the default page" carried no checkable claim, because only
+  create/make/write counted as asking for something. The run then reported success
+  having produced nothing. Ensure, set up, start, serve and run now count, so an
+  unmet claim is reported and replanned instead of passing silently.
+
 ## [0.3.11] - 2026-09-06
 
 ### Added

@@ -17,11 +17,13 @@ from .core import TacuError
 from .routing import (
     CAPABILITIES, Capability, connection_state_from_intent,
     extract_file_delete, extract_file_write, file_edit_target, intent_content_needles,
-    intent_is_application_query, intent_is_delete, intent_is_file_edit,
+    intent_is_application_query, intent_is_build_task, intent_is_delete,
+    intent_is_file_edit,
     intent_is_site_create, intent_tool_family, TOOL_FAMILIES,
     intent_host_domain, intent_wants_host_mutate, intent_writes_or_serves, native_steps_for_intent, prefers_coding_write,
     score_capability, script_body_for_intent, workspace_run_from_intent,
-    SHORTLIST_LIMIT_PLANNER, SHORTLIST_MIN_SCORE, _CODE_SUFFIXES, _port_from_intent,
+    SHORTLIST_LIMIT_PLANNER, SHORTLIST_MIN_SCORE, _CODE_SUFFIXES, _HOST_READ_TOOLS as HOST_READ_TOOLS,
+    _port_from_intent,
 )
 
 CAPABILITY_PLAN_SCHEMA = "tacu.capability-plan/v1"
@@ -66,11 +68,17 @@ def planner_shortlist(intent: str, *, limit: int = SHORTLIST_LIMIT_PLANNER,
     cards: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
+    building = intent_is_build_task(intent)
+
     def add(cap: Capability, score: int) -> None:
         key = (cap.tool, cap.operation)
         if key in seen:
             return
         if cap.risk == "host_mutate" and not include_host_mutate:
+            return
+        if building and cap.risk == "read" and cap.tool in HOST_READ_TOOLS:
+            # Offering "report the current directory" to a planner asked to build
+            # something invites it to answer a question nobody asked, and it did.
             return
         seen.add(key)
         cards.append({

@@ -29,7 +29,13 @@ _KIND_WORDS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("python script", (".py",), "a Python script"),
     ("dockerfile", ("dockerfile",), "a Dockerfile"),
 )
-_CREATES = re.compile(r"\b(?:create|make|write|generate|build|add|produce)\b", re.I)
+# "ensure index.html is the default page" asks for the same file as "create
+# index.html". Leaving these verbs out meant the request carried no checkable
+# claim, so the run reported success having produced nothing.
+_CREATES = re.compile(
+    r"\b(?:create|creates|creating|make|makes|making|write|writes|writing|generate|"
+    r"generates|generating|build|builds|building|add|adds|adding|produce|produces|"
+    r"ensure|ensures|ensuring|set ?up|scaffold|serve|start|run)\b", re.I)
 _NAMED_FILE = re.compile(r"\b([\w.-]+\.(?:html?|py|js|ts|css|sh|json|ya?ml|toml|md|txt))\b", re.I)
 _SERVE_WORDS = re.compile(r"\b(?:serve|server|http|https|listen|port)\b", re.I)
 

@@ -1106,15 +1106,60 @@ _PRONOUNS = frozenset(("it", "this", "that", "them", "those", "these", "there", 
                        "one", "same", "browser", "app", "application"))
 
 
+# An application name is a name: a few words, no verbs, no prepositions. These
+# are the words that mean the sentence is still describing work to do, so the
+# thing after "start" is not something already installed on the machine.
+_INSTRUCTION_WORDS = frozenset((
+    "after", "before", "once", "when", "while", "until", "so", "because", "since",
+    "creating", "create", "installing", "install", "setting", "set", "configuring",
+    "configure", "building", "build", "writing", "write", "generating", "generate",
+    "adding", "add", "making", "make", "ensure", "ensuring", "running", "requires",
+    "required", "requried", "dependencies", "dependency", "requirements",
+    "environment", "virtualenv", "venv", "and", "then", "with", "using", "from",
+))
+_LEADING_DETERMINER = re.compile(r"(?i)^(?:the|that|this|these|those|a|an|my|our|your|its)\s+")
+_APP_NAME_MAX_WORDS = 4
+
+# Words that say the request is work to be done, not an application to launch.
+# "start that flask application after creating a virtual environment" is a build
+# task whose last step happens to be "start"; nothing here is installed yet.
+_BUILD_TASK = re.compile(
+    r"""(?ix)\b(?:
+        virtual\s?env(?:ironment)?s? | venv | requirements\.txt | pip\s+install |
+        npm\s+install | dependenc(?:y|ies) |
+        (?:create|creating|set\s?up|setting\s?up|install|installing|configure|
+           configuring|scaffold|bootstrap|initialise|initialize|generate|generating|
+           write|writing|make|making|add|adding|ensure|ensuring)\b
+    )"""
+)
+
+
+def intent_is_build_task(intent: str) -> bool:
+    """Does this ask for something to be built, rather than something to be opened?"""
+
+    return bool(_BUILD_TASK.search(intent or ""))
+
+
 def _clean_app_name(raw: str) -> str:
     name = raw.strip().strip("'\"`.,")
     name = _APP_TAIL.sub("", name).strip()
     if _URL_IN_INTENT.search(name):
         name = _URL_IN_INTENT.sub("", name).strip()
+    # "start that flask application" names no application: drop the determiner
+    # and see whether anything is left that could be a name.
+    name = _LEADING_DETERMINER.sub("", name).strip()
+    name = _APP_TAIL.sub("", name).strip()
     lowered = name.casefold()
+    words = lowered.split()
+    if not words:
+        return ""
+    # A clause is not a name. Length and instruction words both say so, and
+    # either alone is enough to reject.
+    if len(words) > _APP_NAME_MAX_WORDS or any(word in _INSTRUCTION_WORDS for word in words):
+        return ""
     if lowered in _APP_NAME_STOPWORDS or lowered in _PRONOUNS or lowered in _NOT_AN_APP:
         return ""
-    if lowered.split()[-1] in _NOT_AN_APP if lowered.split() else False:
+    if words[-1] in _NOT_AN_APP:
         return ""
     # "run program.py" runs a script; only a bundle is named like a file.
     if "/" in name or (re.search(r"\.[A-Za-z0-9]{1,8}$", name) and not lowered.endswith(".app")):
@@ -1141,6 +1186,10 @@ def app_to_open_from_intent(intent: str) -> str | None:
     if intent_is_explanatory(text):
         # "let me know how can i launch a flask app" asks how, and answering it by
         # launching something would be answering a different question.
+        return None
+    if intent_is_build_task(text):
+        # Nothing is installed yet: "start it after creating a virtual environment"
+        # is the last step of work to do, not a bundle in /Applications.
         return None
     without_url = _URL_IN_INTENT.sub(" ", text)
     trailing = _APP_AFTER_IN.search(without_url)
@@ -1788,6 +1837,9 @@ def score_capability(intent: str, capability: Capability) -> int:
             score -= 140
         elif capability.tool != domain:
             score -= 80
+    if intent_is_build_task(intent) and capability.tool in {"read_file", "repo_map"}:
+        # Building starts with reading what is already there.
+        score += 30
     cpuish = any(word in text for word in ("cpu", "processing", "processor", "%cpu", "compute"))
     if capability.tool == "process" and "process" in text and cpuish:
         score += 20
@@ -1996,6 +2048,10 @@ def score_capability(intent: str, capability: Capability) -> int:
     if capability.tool == "shell":
         if workspace_run_from_intent(intent):
             score += 70
+        elif intent_is_build_task(intent):
+            # Creating an environment, installing dependencies and starting a
+            # server are all commands; a build task that cannot run one is stuck.
+            score += 55
         else:
             score -= 80
     if capability.tool == "filesystem" and capability.operation == "read":
@@ -2010,6 +2066,12 @@ def score_capability(intent: str, capability: Capability) -> int:
             score += 70
         elif intent_is_file_edit(intent):
             score += 45
+        elif intent_is_build_task(intent):
+            # "ensure index.html is the default page" asks for a file without
+            # phrasing it as "write a file", and the request cannot be carried
+            # out by anything else. Without this the planner was offered no way
+            # to produce the file it was asked for.
+            score += 60
         else:
             score -= 50
     if capability.tool == "edit_file":
@@ -2074,6 +2136,22 @@ SHORTLIST_LIMIT_PLANNER = 7
 # Two independent nouns from the question, not one. A single word is how
 # "list the widget inventory" ended up meaning "list this directory".
 _VIEW_FALLBACK_MIN_SCORE = 24
+
+
+
+# Tools that describe the machine. None of them can build anything, so when the
+# ask is "make this work", answering with the current directory or the process
+# list is answering a question nobody asked.
+_HOST_READ_TOOLS = frozenset({"system", "process", "network", "application"})
+
+
+def capability_risk(tool: str, operation: str) -> str:
+    """The declared risk of a native step; unknown steps are treated as execute."""
+
+    for item in CAPABILITIES:
+        if item.tool == tool and item.operation == operation:
+            return item.risk
+    return "execute"
 
 
 def shortlist_capabilities(intent: str, *, limit: int = SHORTLIST_LIMIT_NATIVE,
@@ -2244,6 +2322,12 @@ def _native_steps_for_intent(intent: str, *, include_host_mutate: bool = False,
                 and not app_question):
             continue
         if capability.operation == "serve":
+            continue
+        if (intent_is_build_task(intent) and capability.risk == "read"
+                and capability.tool in _HOST_READ_TOOLS):
+            # "create a venv and start the app" is work to do. A one-line fact
+            # about the host is not an answer to it, and returning one here
+            # stopped the planner from ever being asked.
             continue
         if capability.operation == "write" and capability.tool == "filesystem" and not note_write:
             continue
