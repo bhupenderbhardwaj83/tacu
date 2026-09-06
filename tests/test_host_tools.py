@@ -1266,3 +1266,85 @@ class ProcessGraphTests(unittest.TestCase):
                 "total_processes": 500, "processes": []}
         answer = exact_host_answer("what is running on port 65000", [{"result": {"data": data}}])
         self.assertIn("Nothing is listening on port 65000", answer)
+
+
+class LaunchAndChainTests(unittest.TestCase):
+    """Launching an application, and requests that ask for more than one thing."""
+
+    def test_a_domain_is_not_read_as_a_filename(self) -> None:
+        from tacu.routing import _filenames_from_intent
+
+        for question in ("open the apple.com main website in google chrome",
+                         "open google chrome and launch apple.com",
+                         "open nw18.com in chrome"):
+            self.assertEqual(_filenames_from_intent(question), [], question)
+
+    def test_real_paths_are_still_recognised(self) -> None:
+        from tacu.routing import _filenames_from_intent
+
+        self.assertEqual(_filenames_from_intent("read app.py and config.json"),
+                         ["app.py", "config.json"])
+        self.assertEqual(_filenames_from_intent("read docs/index.html"), ["docs/index.html"])
+
+    def test_a_filename_is_never_an_application_name(self) -> None:
+        from tacu.routing import app_to_open_from_intent, intent_wants_host_mutate
+
+        self.assertIsNone(app_to_open_from_intent("run program.py"))
+        self.assertFalse(intent_wants_host_mutate("run program.py"))
+
+    def test_launch_phrasings_reach_the_application_tool(self) -> None:
+        from tacu.routing import chained_steps_for_intent
+
+        expected = {
+            "launch safari": {"name": "safari"},
+            "open google chrome and launch apple.com":
+                {"name": "google chrome", "url": "https://apple.com"},
+            "open the apple.com main website in google chrome":
+                {"name": "google chrome", "url": "https://apple.com"},
+            "open nw18.com in chrome": {"name": "chrome", "url": "https://nw18.com"},
+        }
+        for question, wanted in expected.items():
+            steps = chained_steps_for_intent(question, include_host_mutate=True)
+            self.assertTrue(steps, question)
+            self.assertEqual((steps[0]["tool"], steps[0]["operation"]), ("application", "open"),
+                             question)
+            for key, value in wanted.items():
+                self.assertEqual(steps[0]["inputs"].get(key), value, question)
+
+    def test_one_action_in_two_clauses_stays_one_step(self) -> None:
+        from tacu.routing import chained_steps_for_intent
+
+        steps = chained_steps_for_intent("open google chrome and launch apple.com",
+                                         include_host_mutate=True)
+        self.assertEqual(len(steps), 1, "'and' alone does not make two instructions")
+
+    def test_an_explicit_then_produces_a_step_for_each_part(self) -> None:
+        from tacu.routing import chained_steps_for_intent
+
+        steps = chained_steps_for_intent("read app.py then open safari", include_host_mutate=True)
+        self.assertEqual([(item["tool"], item["operation"]) for item in steps],
+                         [("read_file", "read"), ("application", "open")])
+
+    def test_a_chain_we_cannot_fully_place_is_left_to_the_planner(self) -> None:
+        from tacu.routing import chained_steps_for_intent
+
+        steps = chained_steps_for_intent(
+            "create an index.html with a hello greeting and then open it in google chrome",
+            include_host_mutate=True)
+        self.assertEqual(steps, [], "half a chain would drop an instruction")
+
+    def test_only_http_addresses_can_be_opened(self) -> None:
+        from tacu.tools.application import _SAFE_URL
+
+        for good in ("https://apple.com", "http://localhost:8000/x?a=1"):
+            self.assertTrue(_SAFE_URL.match(good), good)
+        for bad in ("file:///etc/passwd", "javascript:alert(1)", "https://x.com; rm -rf /",
+                    "https://x.com && curl evil"):
+            self.assertFalse(_SAFE_URL.match(bad), bad)
+
+    def test_the_address_is_a_separate_argument_never_a_shell_string(self) -> None:
+        from tacu.tools.application import _open_argv
+
+        argv = _open_argv("/Applications/Google Chrome.app", "https://apple.com")
+        self.assertIn("https://apple.com", argv)
+        self.assertTrue(all(";" not in part and "|" not in part for part in argv))

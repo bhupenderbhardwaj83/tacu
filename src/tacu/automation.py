@@ -15,6 +15,7 @@ from typing import Any
 from .core import TacuError
 from .providers import ModelProvider
 from .routing import (
+    chained_steps_for_intent,
     apply_known_file_edit, coding_file_create_spec, connection_state_from_intent, directory_target_from_intent,
     extract_file_delete, extract_file_write, file_edit_target, intent_is_file_edit,
     HOST_MUTATE_KEYS, intent_wants_host_mutate,
@@ -807,11 +808,24 @@ def create_plan(client: ModelProvider, intent: str, workspace: Path,
     limit = min(MAX_AUTONOMOUS_STEPS, max(1, max_steps))
     if not failure_code:
         if intent_wants_host_mutate(intent):
-            mutate = native_steps_for_intent(intent, include_host_mutate=True)[:limit]
-            mutate = [item for item in mutate if (item.get("tool"), item.get("operation")) in HOST_MUTATE_KEYS]
+            mutate = chained_steps_for_intent(intent, include_host_mutate=True)[:limit]
+            # The gate is about whether review is needed, not about throwing away the
+            # rest of the plan: "read app.py then open safari" still has to read.
+            if not any((item.get("tool"), item.get("operation")) in HOST_MUTATE_KEYS
+                       for item in mutate):
+                mutate = []
             if not allow_host_mutate:
-                name = (mutate[0].get("inputs") or {}).get("name") if mutate else None
-                example = f"ti do stop the container named {name}" if name else "ti do …"
+                first = mutate[0] if mutate else {}
+                inputs = first.get("inputs") or {}
+                name = inputs.get("name")
+                # Say what this is and how to run it, in the words the user used.
+                if (first.get("tool"), first.get("operation")) == ("application", "open"):
+                    target = inputs.get("url") or name or "the application"
+                    raise TacuError(
+                        f"Opening {target} launches something on this Mac, so it runs only "
+                        f"after you see the step. Re-run with: ti do {intent.strip()}"
+                    )
+                example = f"ti do stop the container named {name}" if name else f"ti do {intent.strip()}"
                 raise TacuError(
                     "That changes container, model, process, or Git state. "
                     f"Reviewed execution only. Re-run with: {example}"
@@ -826,7 +840,7 @@ def create_plan(client: ModelProvider, intent: str, workspace: Path,
                 "That change needs an explicit target. Example: "
                 "ti do stop the container named myness-searxng"
             )
-        native = native_steps_for_intent(intent)[:limit]
+        native = chained_steps_for_intent(intent)[:limit]
         if native:
             return CommandPlan(
                 native[0]["purpose"] if len(native) == 1 else "Use native OS recipes for this host question",

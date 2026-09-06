@@ -2,6 +2,26 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.7] - 2026-09-06
+
+### Added
+
+- A request that asks for more than one thing is planned as more than one step.
+  "read app.py then open safari" reads and then opens; "open google chrome and launch
+  apple.com" stays a single action, because "and" alone does not make two instructions.
+  A chain whose parts cannot all be placed is left to the planner rather than half done.
+
+### Fixed
+
+- A domain has the shape of a filename, so `apple.com` was looked for on disk and
+  "open the apple.com main website in google chrome" became a hunt for files that never
+  existed. Addresses are no longer read as paths, while real paths are unaffected.
+- `ti auto` refused a launch without saying what to do. It now names the target and the
+  command that runs it.
+- A filename is no longer mistaken for an application name, so "run program.py" is still
+  a script rather than something to launch.
+- A chained plan kept only its host action, dropping the other steps.
+
 ## [0.3.6] - 2026-09-06
 
 ### Added
@@ -191,6 +211,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.3.7]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.7
 [0.3.6]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.6
 [0.3.5]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.5
 [0.3.4]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.4

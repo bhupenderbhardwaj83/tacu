@@ -873,6 +873,10 @@ HOST_MUTATE_OPERATIONS = frozenset(operation for _tool, operation in HOST_MUTATE
 
 def intent_wants_host_mutate(intent: str) -> bool:
     text = normalize_intent_text(intent)
+    # "open index.html in google chrome" launches something too, even though the
+    # application is not the word right after the verb.
+    if re.search(r"(?i)\b(?:open|launch|start|run)\b", text) and app_to_open_from_intent(intent):
+        return True
     return bool(re.search(
         r"\b(kill|terminate|sigterm|sigkill|brew install|brew upgrade|brew uninstall|brew remove|"
         r"(?:open|launch|start)\s+(?:up\s+)?(?:the\s+)?(?:app(?:lication)?|browser|chrome|safari|"
@@ -1069,6 +1073,9 @@ def _clean_app_name(raw: str) -> str:
     lowered = name.casefold()
     if lowered in _APP_NAME_STOPWORDS or lowered in _PRONOUNS:
         return ""
+    # "run program.py" runs a script; only a bundle is named like a file.
+    if "/" in name or (re.search(r"\.[A-Za-z0-9]{1,8}$", name) and not lowered.endswith(".app")):
+        return ""
     return name
 
 
@@ -1184,6 +1191,22 @@ def _filename_from_intent(intent: str) -> str | None:
     return token
 
 
+# Suffixes that end an address rather than a file. A path separator or a scheme
+# settles it either way, so only the bare "name.suffix" case needs this.
+_ADDRESS_SUFFIXES = frozenset((
+    "com", "org", "net", "io", "dev", "ai", "co", "in", "uk", "us", "eu", "de", "fr",
+    "edu", "gov", "mil", "int", "app", "me", "tv", "news", "xyz", "info", "biz", "online",
+    "site", "shop", "cloud", "tech", "store", "blog", "live", "world", "today", "gg",
+))
+
+
+def _looks_like_a_domain(value: str) -> bool:
+    if "/" in value:
+        return False
+    suffix = value.rsplit(".", 1)[-1].casefold()
+    return suffix in _ADDRESS_SUFFIXES
+
+
 def _filenames_from_intent(intent: str) -> list[str]:
     """Return explicit file paths in mention order, without guessing names.
 
@@ -1195,6 +1218,10 @@ def _filenames_from_intent(intent: str) -> list[str]:
     found: list[str] = []
     for match in re.finditer(pattern, intent):
         value = match.group(1).replace("\\", "/")
+        if _looks_like_a_domain(value):
+            # apple.com has the shape of a filename and is not one. Reading it as a
+            # path turns "open apple.com" into a hunt for files that never existed.
+            continue
         if value not in found:
             found.append(value)
     return found
@@ -1922,6 +1949,59 @@ def shortlist_capabilities(intent: str, *, limit: int = SHORTLIST_LIMIT_NATIVE,
     ranked = sorted(((score_capability(intent, item), item) for item in CAPABILITIES),
                     key=lambda pair: pair[0], reverse=True)
     return [(score, item) for score, item in ranked if score >= min_score][:limit]
+
+
+# Words that join two separate instructions. "and" alone does not qualify: "open
+# chrome and launch apple.com" is one action described in two clauses.
+_CHAIN_SPLIT = re.compile(r"(?i)\s*(?:,\s*)?\b(?:and\s+then|then|after\s+that|"
+                          r"once\s+(?:that\s+is\s+)?done|followed\s+by|next)\b\s*")
+_REFERS_BACK = re.compile(r"(?i)\b(?:it|that|this|the file|the page|them)\b")
+
+
+def chained_steps_for_intent(intent: str, *,
+                             include_host_mutate: bool = False) -> list[dict[str, Any]]:
+    """Plan a request that asks for more than one thing.
+
+    The whole request is tried first, so a single action described in two clauses
+    stays one step. Only when nothing matches as a whole is it split, and a later
+    part that refers back ("open *it*") is pointed at what an earlier part created.
+    """
+
+    parts = [part.strip() for part in _CHAIN_SPLIT.split(intent or "") if part.strip()]
+    if len(parts) < 2:
+        # One instruction, however many clauses: "open chrome and launch apple.com".
+        return native_steps_for_intent(intent, include_host_mutate=include_host_mutate)
+    steps: list[dict[str, Any]] = []
+    produced: list[str] = []
+    covered = 0
+    for part in parts:
+        planned = native_steps_for_intent(part, include_host_mutate=include_host_mutate)
+        if not planned and _REFERS_BACK.search(part) and produced:
+            planned = native_steps_for_intent(
+                _REFERS_BACK.sub(produced[-1], part, count=1),
+                include_host_mutate=include_host_mutate)
+        for step in planned:
+            inputs = step.get("inputs") or {}
+            # "open it" after writing index.html means that file.
+            if (step.get("tool"), step.get("operation")) == ("application", "open") \
+                    and produced and not inputs.get("url") and not inputs.get("path"):
+                if _REFERS_BACK.search(part):
+                    inputs["path"] = produced[-1]
+            name = inputs.get("path") or inputs.get("name")
+            if step.get("tool") in {"write_file", "filesystem"} and name:
+                produced.append(str(name))
+        if planned:
+            covered += 1
+        steps.extend(planned)
+    # Every part must be planned. Returning half a chain would quietly drop the
+    # instruction we could not place, which is worse than letting the planner see
+    # the whole request.
+    if covered == len(parts):
+        return steps
+    # Some part of an explicit chain has no native step. Answering with the parts we
+    # do recognise would quietly drop an instruction, so hand the whole request to
+    # the planner instead of doing half of it.
+    return []
 
 
 def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -> list[dict[str, Any]]:
