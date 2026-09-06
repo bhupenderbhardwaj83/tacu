@@ -540,6 +540,15 @@ if [[ -o interactive && "${TACU_GHOST_PROMPTS:-1}" != 0 ]]; then
     print -r -- ''
   }
 
+  _tacu_ghost_insertable() {
+    # A ghost suggestion is typed into the user's command line for them, so it
+    # must be text they can read and edit. History can hold a line saved in a
+    # broken encoding — one mangled Devanagari command in ~/.zsh_history was
+    # replayed into the prompt every time "ti auto " was typed, which looked
+    # like TACU emitting Hindi out of nowhere. Suggest ASCII only.
+    [[ "$1" != *[^[:ascii:]]* ]]
+  }
+
   _tacu_ghost_from_history() {
     # L3: successful TACU cmds (ghost_cmds.log) + zsh history — frequency/recency/cwd.
     local key="$1" line cmd row_cwd stamp suffix
@@ -549,6 +558,7 @@ if [[ -o interactive && "${TACU_GHOST_PROMPTS:-1}" != 0 ]]; then
     if [[ -f "$log" ]]; then
       while IFS=$'\t' read -r stamp row_cwd cmd; do
         [[ "$cmd" == "$key"* && "$cmd" != "$key" ]] || continue
+        _tacu_ghost_insertable "$cmd" || continue
         local bonus=1
         [[ "$row_cwd" == "$here" ]] && bonus=2
         scores[$cmd]=$(( ${scores[$cmd]:-0} + bonus ))
@@ -570,6 +580,7 @@ if [[ -o interactive && "${TACU_GHOST_PROMPTS:-1}" != 0 ]]; then
     for line in ${(Oa)history}; do
       [[ "$line" == ti\ * || "$line" == ticu\ * ]] || continue
       [[ "$line" == ticu* ]] && line="ti${line#ticu}"
+      _tacu_ghost_insertable "$line" || continue
       if [[ "$line" == "$key"* && "$line" != "$key" ]]; then
         print -r -- "${line#$key}"
         return

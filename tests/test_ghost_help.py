@@ -106,3 +106,34 @@ class HelpCatalogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GhostSuggestionSafetyTests(unittest.TestCase):
+    """A ghost suggestion is typed into the user's command line for them."""
+
+    def test_history_suggestions_are_filtered_before_being_offered(self) -> None:
+        # One mangled Devanagari line in ~/.zsh_history was replayed into the
+        # prompt on every "ti auto ", which read as TACU emitting Hindi.
+        from tacu.completion import shell_initialization
+
+        script = shell_initialization("zsh")
+        self.assertIn("_tacu_ghost_insertable()", script)
+        # Both history sources are guarded, not just one.
+        self.assertIn('_tacu_ghost_insertable "$cmd"', script)
+        self.assertIn('_tacu_ghost_insertable "$line"', script)
+
+    def test_the_generated_zsh_still_parses(self) -> None:
+        import shutil
+        import subprocess
+        import tempfile
+
+        from tacu.completion import shell_initialization
+
+        zsh = shutil.which("zsh")
+        if not zsh:
+            self.skipTest("zsh not installed")
+        with tempfile.NamedTemporaryFile("w", suffix=".zsh", delete=False) as handle:
+            handle.write(shell_initialization("zsh"))
+            path = handle.name
+        result = subprocess.run([zsh, "-n", path], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)

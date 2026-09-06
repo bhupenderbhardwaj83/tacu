@@ -2,6 +2,17 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.13] - 2026-09-06
+
+### Fixed
+
+- TACU was typing Hindi into the command line. A single mangled Devanagari entry
+  in `~/.zsh_history` matched the prefix `ti auto ` and the ghost suggester offered
+  its remainder as completion text, so accepting a ghost inserted characters the
+  user never typed and could not read. Ghost suggestions drawn from history are now
+  ASCII only, from both the TACU log and the shell history. This was never a
+  keyboard or input-source problem: the text came from TACU.
+
 ## [0.3.12] - 2026-09-06
 
 ### Fixed
