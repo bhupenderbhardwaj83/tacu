@@ -483,6 +483,56 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("git remote", "remote url", "origin url", "git remotes"),
                ("git", "remote"),
                "List Git remotes"),
+    Capability("git", "diff_staged",
+               ("staged diff", "git diff staged", "what is staged", "staged changes",
+                "diff cached", "about to commit"),
+               ("git", "staged"),
+               "Show what is staged for the next Git commit"),
+    Capability("git", "show",
+               ("git show", "show commit", "what was in commit", "details of commit",
+                "commit details"),
+               ("git", "commit", "show"),
+               "Show one Git commit and the files it touched"),
+    Capability("git", "blame",
+               ("git blame", "who wrote", "who changed", "blame the file", "who owns this file"),
+               ("git", "blame", "author"),
+               "Show who wrote the lines of a file"),
+    Capability("git", "config",
+               ("git config", "git settings", "git configuration", "git user name",
+                "git user email", "my git identity", "git config list"),
+               ("git", "config", "setting", "settings"),
+               "Show every Git setting in force and where it comes from"),
+    Capability("git", "tags",
+               ("git tags", "list tags", "which tags", "version tags", "release tags"),
+               ("git", "tag", "tags"),
+               "List Git tags, newest first"),
+    Capability("git", "stashes",
+               ("git stash list", "list stashes", "what is stashed", "stashed changes"),
+               ("git", "stash", "stashes"),
+               "List Git stashes"),
+    Capability("git", "describe",
+               ("git describe", "version from git", "nearest tag", "which release am i on"),
+               ("git", "describe", "version"),
+               "Describe the checkout against the nearest Git tag"),
+    Capability("git", "shortlog",
+               ("git shortlog", "who contributed", "contributors", "commits per author",
+                "contribution count"),
+               ("git", "contributor", "contributors", "author"),
+               "Count Git commits per author"),
+    Capability("git", "reflog",
+               ("git reflog", "reflog", "where was head", "recent head moves"),
+               ("git", "reflog"),
+               "Show recent Git HEAD movements"),
+    Capability("git", "files",
+               ("git ls-files", "tracked files", "files tracked by git", "which files are tracked"),
+               ("git", "tracked"),
+               "List files tracked by Git"),
+    Capability("git", "ahead_behind",
+               ("ahead or behind", "commits ahead", "ahead of origin", "ahead of the remote",
+                "commits behind", "behind origin", "unpushed commits", "not pushed yet",
+                "am i up to date with origin", "diverged from origin"),
+               ("git", "ahead", "behind", "unpushed", "origin"),
+               "Count Git commits ahead of and behind the upstream branch"),
     Capability("filesystem", "write",
                ("create a", "create an", "create a text file", "create a file", "write a file",
                 "make a file", "text file with", "file with the following", "save a file",
@@ -849,6 +899,68 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("ollama", "model", "stop"),
                "Stop a loaded Ollama model (reviewed)",
                risk="host_mutate"),
+    Capability("git", "pull",
+               ("git pull", "pull the latest", "pull from origin", "pull changes",
+                "update from remote"),
+               ("git", "pull"),
+               "Pull Git commits from the remote (reviewed)",
+               risk="host_mutate"),
+    Capability("git", "fetch",
+               ("git fetch", "fetch from origin", "fetch the remote", "refresh remote refs"),
+               ("git", "fetch"),
+               "Fetch Git refs from the remote (reviewed)",
+               risk="host_mutate"),
+    Capability("git", "clone",
+               ("git clone", "clone the repo", "clone this repository", "clone the repository",
+                "make a copy of the repo"),
+               ("git", "clone", "repo", "repository"),
+               "Clone a Git repository (reviewed)",
+               risk="host_mutate"),
+    Capability("git", "checkout",
+               ("git checkout", "git switch", "switch branch", "switch to the",
+                "check out the", "checkout the", "move to branch", "change branch",
+                "go to the branch"),
+               ("git", "checkout", "branch", "switch"),
+               "Check out a Git branch or commit (reviewed)",
+               risk="host_mutate"),
+    Capability("git", "merge",
+               ("git merge", "merge the", "merge into", "merge branch"),
+               ("git", "merge", "branch"),
+               "Merge a Git branch (reviewed)",
+               risk="host_mutate"),
+    Capability("git", "reset",
+               ("git reset", "reset the branch", "undo the commit", "unstage everything",
+                "reset hard", "reset soft"),
+               ("git", "reset"),
+               "Reset the Git branch to a commit (reviewed; the mode is named, never assumed)",
+               risk="host_mutate"),
+    Capability("git", "revert",
+               ("git revert", "revert the commit", "revert that commit", "revert this commit",
+                "undo that commit", "undo the commit"),
+               ("git", "revert", "commit"),
+               "Revert a Git commit (reviewed)",
+               risk="host_mutate"),
+    Capability("git", "restore",
+               ("git restore", "discard my changes", "restore the file", "throw away changes"),
+               ("git", "restore", "discard"),
+               "Restore a file from Git (reviewed)",
+               risk="host_mutate"),
+    Capability("git", "stash",
+               ("git stash", "stash my changes", "stash the", "stash these", "stash the work",
+                "put changes aside", "set my changes aside"),
+               ("git", "stash"),
+               "Stash uncommitted Git changes (reviewed)",
+               risk="host_mutate"),
+    Capability("git", "stash_pop",
+               ("git stash pop", "restore the stash", "pop the stash", "bring back stashed"),
+               ("git", "stash", "pop"),
+               "Restore the most recent Git stash (reviewed)",
+               risk="host_mutate"),
+    Capability("git", "tag",
+               ("git tag", "tag this release", "create a tag", "tag the commit"),
+               ("git", "tag"),
+               "Create a Git tag (reviewed)",
+               risk="host_mutate"),
     Capability("git", "add",
                ("git add", "stage file", "stage the file"),
                ("git", "add", "stage"),
@@ -923,7 +1035,20 @@ def intent_wants_host_mutate(intent: str) -> bool:
         r"docker (?:start|stop|rm|rmi|pull)|"
         r"ollama (?:pull|rm|stop)|"
         r"(?:delete|remove) (?:the )?(?:docker )?(?:container|image|model)|"
-        r"git (?:add|commit|push)|(?:stage|commit|push) (?:the )?(?:file|changes|commits)|"
+        r"git (?:add|commit|push|pull|fetch|clone|checkout|switch|merge|reset|revert|"
+        r"restore|stash|tag)|"
+        r"(?:stage|commit|push) (?:the )?(?:file|changes|commits)|"
+        # The same operations as people say them, without naming git.
+        r"(?:pull|fetch) (?:the )?(?:latest|changes|from|remote|origin|upstream)|"
+        r"stash (?:my |the |these |those )?(?:changes|work|edits)?|"
+        r"(?:pop|apply|restore) (?:the )?stash|"
+        r"(?:check\s?out|switch to) (?:the )?[A-Za-z0-9._/-]+ ?(?:branch)?|"
+        r"merge (?:the )?[A-Za-z0-9._/-]+ ?(?:branch)?|"
+        r"(?:revert|undo) (?:the |that |this )?commit|"
+        r"clone (?:the |this )?(?:repo|repository|project)|"
+        r"reset (?:the )?(?:branch|repo|repository|working tree|--?\w+)|"
+        r"tag (?:this|the) (?:release|commit|version)|"
+        r"discard (?:my |the )?(?:changes|edits)|"
         r"launchctl (?:start|stop|kickstart))\b",
         text,
     ))
@@ -1963,7 +2088,12 @@ def score_capability(intent: str, capability: Capability) -> int:
             score += 60
         else:
             score -= 40
-    if capability.tool == "docker" and "docker" not in text and "container" not in text:
+    # Naming the tool is one kind of evidence; using its own words is another.
+    # "who wrote this file" is a blame request and "stash my changes" is a stash
+    # request, and demanding the word "git" first is what made people fall back
+    # to the native commands these tools exist to replace.
+    if (capability.tool == "docker" and not phrase_hit
+            and "docker" not in text and "container" not in text):
         score -= 80
     if capability.tool == "docker" and capability.operation == "inspect":
         if any(word in text for word in ("inspect", "network", "base image", "details")):
@@ -1976,7 +2106,7 @@ def score_capability(intent: str, capability: Capability) -> int:
         score -= 80
     if capability.tool == "docker" and capability.operation in {"start", "stop"} and capability.operation in text and "container" in text:
         score += 80
-    if capability.tool == "git" and "git" not in text:
+    if capability.tool == "git" and not phrase_hit and "git" not in text:
         score -= 80
     if capability.operation == "find_repos" and "find" not in text and "directories" not in text:
         score -= 40
@@ -2258,7 +2388,11 @@ def _native_steps_for_intent(intent: str, *, include_host_mutate: bool = False,
                 continue
             if (cap.tool, cap.operation) in seen_caps:
                 continue
-            extras.append((max(score_capability(intent, cap), SHORTLIST_MIN_SCORE + 10), cap))
+            # Score these on their merits. A floor made every host mutation tie,
+            # so "checkout the main branch" could be answered by process.kill.
+            merit = score_capability(intent, cap)
+            if merit >= SHORTLIST_MIN_SCORE:
+                extras.append((merit, cap))
         # Rank the whole field by score. Prepending the host-mutate candidates put a
         # floor-scored one ahead of a capability that actually matched the words, so
         # "launch apple.com" was answered by docker start.
