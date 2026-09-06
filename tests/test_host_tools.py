@@ -1348,3 +1348,61 @@ class LaunchAndChainTests(unittest.TestCase):
         argv = _open_argv("/Applications/Google Chrome.app", "https://apple.com")
         self.assertIn("https://apple.com", argv)
         self.assertTrue(all(";" not in part and "|" not in part for part in argv))
+
+
+class ApplicationLookupTests(unittest.TestCase):
+    """TACU can see what is installed, so it should answer about what is installed."""
+
+    def test_a_vendor_name_absent_from_the_bundle_still_matches(self) -> None:
+        from tacu.tools.application import _match_rank
+
+        falcon = Path("/Applications/Falcon.app")
+        self.assertGreater(_match_rank(falcon, "crowdstrike falcon"), 0,
+                           "CrowdStrike ships Falcon.app; the vendor is not in the name")
+        self.assertGreater(_match_rank(falcon, "falcon"), 0)
+
+    def test_an_exact_name_outranks_a_partial_one(self) -> None:
+        from tacu.tools.application import _match_rank
+
+        exact = _match_rank(Path("/Applications/Falcon.app"), "falcon")
+        partial = _match_rank(Path("/Applications/Falcon Helper.app"), "falcon")
+        self.assertGreater(exact, partial)
+
+    def test_noise_words_do_not_prevent_a_match(self) -> None:
+        from tacu.tools.application import _match_rank
+
+        chrome = Path("/Applications/Google Chrome.app")
+        for query in ("google chrome software", "the google chrome application", "google chrome app"):
+            self.assertGreater(_match_rank(chrome, query), 0, query)
+
+    def test_an_unrelated_query_matches_nothing(self) -> None:
+        from tacu.tools.application import _match_rank
+
+        self.assertEqual(_match_rank(Path("/Applications/Falcon.app"), "zzznotreal"), 0)
+
+    def test_a_two_letter_fragment_is_not_a_match(self) -> None:
+        from tacu.tools.application import _match_rank
+
+        self.assertEqual(_match_rank(Path("/Applications/Falcon.app"), "on"), 0)
+
+    def test_version_and_installed_questions_route_with_the_name(self) -> None:
+        expected = {
+            "which version of crowdstrike falcon software am i running":
+                ("version", "crowdstrike falcon"),
+            "what version of google chrome do i have": ("version", "google chrome"),
+            "is burp suite installed": ("find", "burp suite"),
+        }
+        for question, (operation, name) in expected.items():
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertEqual(steps[0]["operation"], operation, question)
+            self.assertEqual(steps[0]["inputs"].get("name"), name, question)
+
+    def test_asking_for_all_applications_does_not_truncate(self) -> None:
+        for question in ("please show all the applications installed on my machine",
+                         "please show all the applications installed on my machine, "
+                         "list all of them please"):
+            steps = native_steps_for_intent(question)
+            self.assertTrue(steps, question)
+            self.assertEqual(steps[0]["operation"], "list", question)
+            self.assertGreaterEqual(steps[0]["inputs"].get("limit", 0), 400, question)

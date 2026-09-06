@@ -3145,14 +3145,28 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
         # cannot loop, because an attempt is never repeated.
         criteria = acceptance.criteria_for(intent)
         budget = MAX_COGNITIVE_TURNS + (2 if criteria else 0)
+        acceptance_hint = ""
+        tried_for: set[str] = set()
         for turn in range(1, budget + 1):
             failure = critique_goal(intent, results, workspace=workspace, before=before)
             if not failure and criteria:
                 missing = acceptance.unmet(criteria, workspace)
                 if missing:
                     describes, why = missing[0][0].describes, missing[0][1]
+                    if describes in tried_for:
+                        # One replan has already been spent on this and it is still
+                        # unmet. Trying again with the same information would only
+                        # cost the user more time for the same result.
+                        print(paint(f"  check · {describes} is still unmet after a retry; "
+                                    "reporting rather than trying again", PALETTE.muted))
+                        break
+                    tried_for.add(describes)
                     print(paint(f"  check · {describes} — {why}", PALETTE.muted))
                     failure = f"unmet: {describes}"
+                    # Tell the planner exactly what is missing; "unmet" on its own
+                    # produced another file with the same gap.
+                    acceptance_hint = (f"The request is not satisfied yet: {describes}. "
+                                       f"{why}. Change the file so this holds.")
             if not failure:
                 break
             # Read the error before deciding anything: a diagnosable failure has a
@@ -3173,6 +3187,8 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
                 try:
                     print(paint(f"  critic · {failure} · replanning", PALETTE.muted))
                     evidence = format_critic_evidence(intent, results, workspace)
+                    if acceptance_hint:
+                        evidence = f"{acceptance_hint}\n{evidence}".strip()
                     repair = create_plan(
                         client, intent, workspace, arguments.max_steps, failure_code=failure,
                         allow_shell=False, critic_evidence=evidence or None,

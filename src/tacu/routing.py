@@ -395,15 +395,19 @@ CAPABILITIES: tuple[Capability, ...] = (
                "Report system memory"),
     Capability("application", "list",
                ("installed apps", "installed applications", "applications folder", "apps in applications",
-                "tell me installed apps"),
+                "tell me installed apps", "all the applications", "all applications",
+                "applications installed", "apps installed", "show all the apps",
+                "list all the applications", "what applications", "what apps",
+                "which applications are installed", "software installed"),
                ("application", "app"),
                "List installed applications"),
     Capability("application", "find",
-               ("app named", "app that contain", "application named", "contain falcon", "app containing"),
+               ("app named", "app that contain", "application named", "contain falcon", "app containing", "is installed", "do i have", "have i got", "installed or not"),
                ("application", "app"),
                "Find an installed application by name"),
     Capability("application", "version",
-               ("app version", "application version", "what version is"),
+               ("app version", "application version", "what version is", "which version of", "what version of", "version of the app",
+                "is it installed", "do i have installed", "version am i running"),
                ("version", "application", "app"),
                "Read installed application version metadata"),
     Capability("application", "metadata",
@@ -1102,7 +1106,21 @@ def app_to_open_from_intent(intent: str) -> str | None:
     return None
 
 
+# "which version of crowdstrike falcon software am i running"
+_APP_VERSION_QUERY = re.compile(
+    r"(?i)\bversion\s+(?:of|for)\s+(?:the\s+)?(.+?)"
+    r"(?=\s+(?:software|application|app|program|tool|client|agent|am|is|are|do|does|on|that)\b|[?.]|$)")
+_APP_INSTALLED_QUERY = re.compile(
+    r"(?i)\b(?:is|do i have|have i got)\s+(?:the\s+)?(.+?)\s+(?:installed|present|available)\b")
+
+
 def _app_name_from_intent(intent: str) -> str | None:
+    for pattern in (_APP_VERSION_QUERY, _APP_INSTALLED_QUERY):
+        match = pattern.search(intent or "")
+        if match:
+            token = match.group(1).strip().strip("'\"`.,")
+            if token and token.casefold() not in _APP_NAME_STOPWORDS and len(token) > 2:
+                return token
     path_match = re.search(r"(/Applications/[^/\s]+(?:\s[^/\s]+)*\.app)", intent)
     if path_match:
         from pathlib import Path as _Path
@@ -1750,7 +1768,12 @@ def score_capability(intent: str, capability: Capability) -> int:
     if capability.tool == "application":
         install_ask = ((".app" in text) or ("install date" in text)
                        or ("when was" in text and "installed" in text))
-        if not any(word in text for word in ("app", "application", "version")) and not install_ask:
+        # A name we could actually pull out is better evidence than the word "app"
+        # appearing: "is burp suite installed" names one without using either word.
+        named = bool(_APP_VERSION_QUERY.search(intent or "")
+                     or _APP_INSTALLED_QUERY.search(intent or ""))
+        if (not any(word in text for word in ("app", "application", "version"))
+                and not install_ask and not named):
             score -= 40
         elif install_ask and capability.operation == "metadata":
             score += 35
@@ -1778,6 +1801,12 @@ def score_capability(intent: str, capability: Capability) -> int:
             score -= 80
         elif any(phrase in text for phrase in ("ip address", "my ip", "primary ip")):
             score += 20
+    if capability.tool == "application" and capability.operation in {"find", "version"}:
+        # "is burp suite installed" names an application even though no fixed phrase
+        # survives the words between. Only these question shapes count as evidence,
+        # so a file search that happens to name something is unaffected.
+        if _APP_VERSION_QUERY.search(intent or "") or _APP_INSTALLED_QUERY.search(intent or ""):
+            score += 55
     if capability.tool == "application" and capability.operation == "open":
         # An openable name plus an opening verb is what an open request looks like;
         # no list of application names is needed to recognise one.
@@ -2110,7 +2139,9 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
             if capability.operation not in {"write", "serve", "delete"}:
                 inputs["limit"] = limit
         if capability.tool == "application":
-            inputs["limit"] = limit_from_intent(intent, default=40)
+            # "all" means all; a default that truncates turns a listing into a wrong answer.
+            wants_all = re.search(r"(?i)\b(?:all|every|complete|full|entire)\b", intent or "")
+            inputs["limit"] = limit_from_intent(intent, default=400 if wants_all else 100)
         if capability.operation in {"connections", "port_owner"} and port:
             inputs["port"] = port
         if capability.tool == "application" and capability.operation == "open":

@@ -42,13 +42,57 @@ def _app_roots() -> list[Path]:
     return [Path("/usr/share/applications"), Path("/usr/local/share/applications"), home / ".local/share/applications"]
 
 
+# Words people add that never appear in a bundle name.
+_APP_QUERY_NOISE = frozenset((
+    "app", "apps", "application", "applications", "software", "program", "programme",
+    "tool", "client", "agent", "the", "a", "an", "my", "for", "mac", "macos", "version",
+))
+
+
+def _query_tokens(name: str) -> list[str]:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", name.casefold().removesuffix(".app"))
+    # Two-letter fragments match half of /Applications, so they are not evidence.
+    return [word for word in cleaned.split()
+            if len(word) >= 3 and word not in _APP_QUERY_NOISE]
+
+
+def _match_rank(path: Path, name: str) -> int:
+    """How well a bundle answers to what was asked. Zero means it does not.
+
+    A vendor name is often absent from the bundle: CrowdStrike ships "Falcon.app",
+    so requiring the whole phrase would report a product as not installed while it
+    sits in /Applications.
+    """
+
+    needle = name.casefold().removesuffix(".app").strip()
+    stem = path.stem.casefold()
+    if not needle:
+        return 0
+    if stem == needle:
+        return 100
+    # A fragment shorter than three characters matches half of /Applications.
+    if len(needle) >= 3 and needle in stem:
+        return 80
+    tokens = _query_tokens(name)
+    if not tokens:
+        return 0
+    hits = [word for word in tokens if word in stem]
+    if not hits:
+        return 0
+    if len(hits) == len(tokens):
+        return 60
+    # A single distinctive word is enough; a two-letter fragment is not.
+    return 40 if max(len(word) for word in hits) >= 4 else 0
+
+
 def _matches(path: Path, name: str) -> bool:
-    needle = name.casefold().removesuffix(".app")
-    return needle in path.stem.casefold() or needle in path.name.casefold()
+    return _match_rank(path, name) > 0
 
 
 def _find_apps(name: str, limit: int = 10) -> list[Path]:
-    found: list[Path] = []
+    """Best match first, so the closest bundle is the one reported on."""
+
+    found: list[tuple[int, Path]] = []
     for root in _app_roots():
         if not root.is_dir():
             continue
@@ -57,13 +101,15 @@ def _find_apps(name: str, limit: int = 10) -> list[Path]:
         except OSError:
             continue
         for child in children:
-            if child.suffix.casefold() == ".app" and _matches(child, name):
-                found.append(child)
-            if detect().os != "macos" and _matches(child, name):
-                found.append(child)
-            if len(found) >= limit:
-                return found
-    return found
+            wanted = child.suffix.casefold() == ".app" or detect().os != "macos"
+            if not wanted:
+                continue
+            rank = _match_rank(child, name)
+            if rank:
+                found.append((rank, child))
+    # Rank before truncating, so a close match is never lost to an early weak one.
+    found.sort(key=lambda pair: (-pair[0], pair[1].stem.casefold()))
+    return [child for _rank, child in found[:limit]]
 
 
 def _mdls_dates(path: Path) -> dict[str, str]:
@@ -166,7 +212,9 @@ def _open_argv(app_path: str | None, url: str) -> list[str]:
 
 def execute(context: ToolContext, *, operation: str, name: str = "", url: str = "",
             limit: int = 40) -> dict[str, Any]:
-    cap = max(1, min(int(limit or 40), 80))
+    # A listing must not silently stop short: "show all my applications" answered
+    # with the first 40 of 79 is a wrong answer, not a shortened one.
+    cap = max(1, min(int(limit or 400), 400))
     needle = name.strip()
     if operation == "list" or (operation in {"find", "version", "metadata"} and not needle):
         apps = [_bundle_metadata(path) for path in _list_apps(cap)]

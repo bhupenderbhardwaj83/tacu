@@ -2,6 +2,23 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.8] - 2026-09-06
+
+### Fixed
+
+- An application was reported as missing while it sat in /Applications, because the whole
+  phrase had to appear in the bundle name: CrowdStrike ships `Falcon.app`, so "which version
+  of crowdstrike falcon" found nothing. Matching now works on the words that carry meaning
+  and ranks the closest bundle first, while a two-letter fragment matches nothing.
+- "show all the applications" answered with the first 40 of 79. A listing no longer stops
+  short, and asking for "all" asks for all.
+- "is burp suite installed" and "which version of X" reached no tool at all; both now
+  route with the name they contain.
+- A replan was told only that something was unmet, so it produced another file with the
+  same gap and spent the whole turn budget doing it. The planner is now told which claim
+  failed and what was looked for, and a claim that survives one retry is reported instead
+  of being retried again.
+
 ## [0.3.7] - 2026-09-06
 
 ### Added
@@ -211,6 +228,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.3.8]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.8
 [0.3.7]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.7
 [0.3.6]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.6
 [0.3.5]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.5
