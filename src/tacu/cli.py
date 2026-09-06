@@ -36,6 +36,7 @@ from .automation import (
     MAX_AUTONOMOUS_STEPS, CommandStep, command_from_text, create_plan, evaluate_policy,
     native_instead_of_shell, _step_from_capability,
 )
+from . import diagnose
 from .companion import exact_answer, exact_host_answer
 from .loop import (
     MAX_AI_TURNS, MAX_COGNITIVE_TURNS, answer_needs_refine,
@@ -2983,6 +2984,30 @@ def _clarify_host_mutate_target(intent: str, workspace: Path) -> str | None:
     return ""
 
 
+
+def _step_fingerprint(step: Any) -> str:
+    """Identity of an attempt, so the loop can refuse to repeat one.
+
+    Two steps are the same attempt when they would do the same thing, whatever
+    wording accompanied them.
+    """
+
+    native_tool = getattr(step, "native_tool", None)
+    if native_tool:
+        # native_inputs is stored as a JSON string; compare it parsed so key order
+        # never makes two identical attempts look different.
+        raw = getattr(step, "native_inputs", None) or "{}"
+        try:
+            inputs = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        except (ValueError, TypeError):
+            inputs = {"raw": str(raw)}
+        payload = sorted((str(key), str(value)) for key, value in inputs.items())
+        return f"{native_tool}:{getattr(step, 'native_operation', '')}:{payload}"
+    executable = getattr(step, "executable", "")
+    args = [str(item) for item in (getattr(step, "args", ()) or ())]
+    return "shell:" + " ".join([str(executable), *args]).strip()
+
+
 def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) -> int:
     autonomous = arguments.subcommand == "auto"
     intent = _intent_text(arguments.intent)
@@ -3076,11 +3101,25 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
             if extra:
                 results = merge_results(results, extra)
         model_replans = 0
+        attempted = {_step_fingerprint(step) for step in plan.steps}
         for turn in range(1, MAX_COGNITIVE_TURNS + 1):
             failure = critique_goal(intent, results, workspace=workspace, before=before)
             if not failure:
                 break
-            extra_spec = correction_from_failure(intent, failure)
+            # Read the error before deciding anything: a diagnosable failure has a
+            # remedy that changes something, which repeating the command never does.
+            trouble = diagnose.failure_text(results)
+            extra_spec = diagnose.remedy(trouble, workspace,
+                                         diagnose.last_failed_step(results)) if trouble else []
+            if extra_spec:
+                reason = diagnose.explain(trouble)
+                if reason:
+                    print(paint(f"  critic · {reason}", PALETTE.muted))
+            else:
+                extra_spec = correction_from_failure(intent, failure)
+            # A correction that repeats what already failed is not a correction.
+            extra_spec = [item for item in extra_spec
+                          if _step_fingerprint(_step_from_capability(item)) not in attempted]
             if not extra_spec and model_replans < MAX_COGNITIVE_TURNS:
                 try:
                     print(paint(f"  critic · {failure} · replanning", PALETTE.muted))
@@ -3090,8 +3129,15 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
                         allow_shell=False, critic_evidence=evidence or None,
                     )
                     model_replans += 1
+                    repair_steps = [step for step in repair.steps
+                                    if _step_fingerprint(step) not in attempted]
+                    if not repair_steps:
+                        print(paint("  critic · the replan repeats what already failed; stopping",
+                                    PALETTE.muted))
+                        break
+                    attempted.update(_step_fingerprint(step) for step in repair_steps)
                     extra = _execute_intent_steps(
-                        repair.steps, workspace=workspace, timeout=arguments.timeout,
+                        repair_steps, workspace=workspace, timeout=arguments.timeout,
                         autonomous=True, start_index=len(results) + 1,
                     )
                     if extra:
@@ -3101,8 +3147,8 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
                     break
             if not extra_spec:
                 break
-            print(paint(f"  critic · {failure}", PALETTE.muted))
             extra_steps = [_step_from_capability(item) for item in extra_spec]
+            attempted.update(_step_fingerprint(step) for step in extra_steps)
             extra = _execute_intent_steps(extra_steps, workspace=workspace, timeout=arguments.timeout,
                                           autonomous=True, start_index=len(results) + 1)
             if not extra:

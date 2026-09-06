@@ -2,6 +2,29 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.4] - 2026-09-06
+
+### Fixed
+
+- A failed command was retried unchanged until the turn budget ran out. The correction for
+  a non-zero exit re-derived the same plan from the same words, and because it returned
+  something the model was never asked to replan. The loop now refuses to repeat an attempt
+  it has already made, and a replan that only repeats earlier work stops instead of looping.
+
+### Added
+
+- The harness reads the failure before deciding what to do. A missing Python module becomes
+  create-an-environment, install, and retry inside it; a missing node module becomes an
+  install with the project's own package manager; an unexecutable script is run through a
+  shell; a bare `pip` becomes `python -m pip`. An unrecognised failure proposes nothing
+  rather than guessing.
+- Dependency work uses the environment's own binaries and never shell activation, which
+  cannot affect a subprocess. Import names are mapped to distribution names, so a missing
+  `cv2` installs `opencv-python`.
+- The project's lockfile decides the package manager: `package-lock.json` means npm even
+  where pnpm is installed, `uv.lock` means uv. `uv` and `pnpm` are preferred only where
+  nothing is pinned and they are actually present.
+
 ## [0.3.3] - 2026-09-06
 
 ### Fixed
@@ -124,6 +147,7 @@ First public release.
   with the same clock grounding the model for `ti ask` and `ti web`.
 - Guided installers for macOS, Linux, and experimental Windows support.
 
+[0.3.4]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.4
 [0.3.3]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.3
 [0.3.2]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.2
 [0.3.1]: https://github.com/bhupenderbhardwaj83/tacu/releases/tag/v0.3.1
