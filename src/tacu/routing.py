@@ -660,6 +660,19 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("run", "execute"),
                "Run a workspace script without nested shell interpolation",
                risk="mutate"),
+    Capability("ollama", "settings",
+               ("ollama settings", "ollama configuration", "ollama config", "keepalive",
+                "keep alive", "keep_alive", "ollama environment", "ollama env",
+                "context window", "context length", "num_ctx", "kv cache", "flash attention",
+                "how is ollama configured", "ollama defaults", "default model", "which model",
+                "model settings", "ollama host", "ollama port", "ollama variables"),
+               ("ollama", "setting", "settings", "config", "keepalive", "context", "default"),
+               "Show every Ollama setting in force — environment, what TACU sends, and which wins"),
+    Capability("ollama", "version",
+               ("ollama version", "which ollama version", "ollama --version",
+                "what version of ollama"),
+               ("ollama", "version"),
+               "Show the installed Ollama version"),
     Capability("ollama", "running_models",
                ("running ollama", "loaded model", "ollama ps", "currently running ollama",
                 "running ollama models"),
@@ -2101,7 +2114,7 @@ def score_capability(intent: str, capability: Capability) -> int:
     if capability.operation == "open_files" and "open file" not in text and "lsof" not in text:
         score -= 50
     if capability.tool == "ollama":
-        if "ollama" not in text and "ollama" not in intent.casefold():
+        if not phrase_hit and "ollama" not in text and "ollama" not in intent.casefold():
             score -= 80
         elif capability.operation == "installed_models" and any(
                 phrase in text for phrase in ("model", "models", "ollama list")):

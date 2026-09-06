@@ -483,6 +483,62 @@ def _storage_headline(volumes: list[str]) -> str:
     return ""
 
 
+# Ollama settings people ask about by name, mapped to the variable that holds
+# them, so "what is my keepalive" is answered with the keepalive.
+_OLLAMA_SETTING_WORDS = (
+    ("keep", "OLLAMA_KEEP_ALIVE"), ("alive", "OLLAMA_KEEP_ALIVE"),
+    ("context", "OLLAMA_CONTEXT_LENGTH"), ("num_ctx", "OLLAMA_CONTEXT_LENGTH"),
+    ("window", "OLLAMA_CONTEXT_LENGTH"), ("host", "OLLAMA_HOST"),
+    ("port", "OLLAMA_HOST"), ("kv", "OLLAMA_KV_CACHE_TYPE"),
+    ("cache", "OLLAMA_KV_CACHE_TYPE"), ("flash", "OLLAMA_FLASH_ATTENTION"),
+    ("parallel", "OLLAMA_NUM_PARALLEL"), ("queue", "OLLAMA_MAX_QUEUE"),
+    ("loaded", "OLLAMA_MAX_LOADED_MODELS"), ("debug", "OLLAMA_DEBUG"),
+    ("where", "OLLAMA_MODELS"), ("stored", "OLLAMA_MODELS"),
+)
+
+
+def _ollama_settings_answer(query: str, data: dict[str, Any]) -> list[str]:
+    """Answer with the setting that was asked about, then what actually applies.
+
+    A setting can be stated in the environment and overridden by what TACU sends
+    with each request. Reporting only the environment variable is how someone
+    ends up trusting a value that never reaches the server.
+    """
+
+    environment = {item["variable"]: item for item in data.get("environment") or []}
+    wanted = [name for word, name in _OLLAMA_SETTING_WORDS if word in query]
+    lines: list[str] = []
+    sent = data.get("tacu_request_options") or {}
+
+    if wanted:
+        for name in dict.fromkeys(wanted):
+            item = environment.get(name)
+            if not item:
+                continue
+            lines.append(f"{name}: {item['in_effect']} — {item['purpose']}.")
+    else:
+        lines.append(f"Active model: {data.get('active_model')}.")
+        for item in data.get("environment") or []:
+            if item.get("set"):
+                lines.append(f"{item['variable']}: {item['value']} — {item['purpose']}.")
+        unset = [item["variable"] for item in data.get("environment") or [] if not item.get("set")]
+        if unset:
+            lines.append("Not set (Ollama defaults apply): " + ", ".join(unset) + ".")
+        lines.append("TACU sends with every request: "
+                     + ", ".join(f"{key}={value}" for key, value in sent.items()) + ".")
+
+    for clash in data.get("conflicts") or []:
+        # The whole point of showing settings is catching this.
+        lines.append(
+            f"⚠ {clash['setting']}: your environment says {clash['environment']}, but TACU sends "
+            f"{clash['tacu_sends']} with every request, so {clash['wins']} is what applies — "
+            f"{clash['why']}.")
+    if wanted and sent:
+        lines.append("TACU's own request options: "
+                     + ", ".join(f"{key}={value}" for key, value in sent.items()) + ".")
+    return lines
+
+
 def _no_app_line(query_name: str, data: dict) -> str:
     """Say nothing was found, and offer the closest installed names when we have them."""
 
@@ -862,7 +918,8 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
         )
         if tool == "ollama" or (tool is None and (
                 data.get("models") is not None or data.get("info") is not None
-                or data.get("operation") in {"model_info", "running_models", "installed_models"}
+                or data.get("operation") in {"model_info", "running_models",
+                                             "installed_models", "settings", "version"}
                 or ollama_mutate)):
             ollama_data.append(data)
         if data.get("system") is not None:
@@ -1136,8 +1193,13 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
                 lines.append(f"Found {len(matches)} matching path(s):")
                 lines.extend(f"- `{item.get('path')}`" for item in matches[:15])
     if ollama_data:
-        data = ollama_data[0]
-        if data.get("operation") in {"pull", "rm", "stop"}:
+        data = next((item for item in ollama_data
+                     if item.get("operation") in {"settings", "version"}), ollama_data[0])
+        if data.get("operation") == "settings":
+            lines.extend(_ollama_settings_answer(query, data))
+        elif data.get("operation") == "version":
+            lines.append(f"Ollama {data.get('version') or 'version unknown'}.")
+        elif data.get("operation") in {"pull", "rm", "stop"}:
             verb = {"pull": "Pulled", "rm": "Removed", "stop": "Stopped"}[data["operation"]]
             if data.get("exit_code") not in (None, 0):
                 lines.append(f"{verb} `{data.get('name')}` failed: {(data.get('stderr') or 'error')[:300]}")
