@@ -483,6 +483,44 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("git remote", "remote url", "origin url", "git remotes"),
                ("git", "remote"),
                "List Git remotes"),
+    Capability("docker", "info",
+               ("docker info", "docker daemon", "docker engine", "docker settings",
+                "docker configuration", "how is docker configured", "docker storage driver"),
+               ("docker", "daemon", "engine", "info", "setting", "settings"),
+               "Show the Docker daemon's configuration and totals"),
+    Capability("docker", "version",
+               ("docker version", "which docker version", "docker client version",
+                "docker api version"),
+               ("docker", "version"),
+               "Show the Docker client and server versions"),
+    Capability("docker", "disk_usage",
+               ("docker disk", "docker space", "docker df", "how much space is docker",
+                "reclaimable docker", "docker taking up"),
+               ("docker", "disk", "space", "usage"),
+               "Show how much disk Docker images, containers and volumes use"),
+    Capability("docker", "top",
+               ("docker top", "processes in the container", "what is running inside the container",
+                "container processes"),
+               ("docker", "container", "process", "processes"),
+               "Show the processes running inside a container"),
+    Capability("docker", "port",
+               ("docker port", "container ports", "which ports does the container",
+                "port mapping", "published ports"),
+               ("docker", "container", "port", "ports"),
+               "Show a container's published port mappings"),
+    Capability("docker", "history",
+               ("docker history", "image layers", "layers of the image", "how was the image built"),
+               ("docker", "image", "layer", "layers", "history"),
+               "Show the layers an image is built from"),
+    Capability("docker", "events",
+               ("docker events", "recent docker activity", "what has docker been doing"),
+               ("docker", "event", "events"),
+               "Show recent Docker daemon events"),
+    Capability("docker", "compose_ps",
+               ("docker compose ps", "compose services", "which compose services",
+                "docker compose status"),
+               ("docker", "compose", "service", "services"),
+               "Show the services in the Docker Compose project here"),
     Capability("git", "diff_staged",
                ("staged diff", "git diff staged", "what is staged", "staged changes",
                 "diff cached", "about to commit"),
@@ -899,6 +937,37 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("ollama", "model", "stop"),
                "Stop a loaded Ollama model (reviewed)",
                risk="host_mutate"),
+    Capability("docker", "restart",
+               ("docker restart", "restart the container", "bounce the container"),
+               ("docker", "restart", "container"),
+               "Restart a Docker container (reviewed)",
+               risk="host_mutate"),
+    Capability("docker", "kill",
+               ("docker kill", "kill the container", "force stop the container"),
+               ("docker", "kill", "container"),
+               "Kill a Docker container (reviewed)",
+               risk="host_mutate"),
+    Capability("docker", "pause",
+               ("docker pause", "pause the container", "freeze the container"),
+               ("docker", "pause", "container"),
+               "Pause a Docker container (reviewed)",
+               risk="host_mutate"),
+    Capability("docker", "unpause",
+               ("docker unpause", "unpause the container", "resume the container"),
+               ("docker", "unpause", "resume", "container"),
+               "Resume a paused Docker container (reviewed)",
+               risk="host_mutate"),
+    Capability("docker", "prune",
+               ("docker prune", "clean up docker", "reclaim docker space", "docker system prune"),
+               ("docker", "prune", "cleanup"),
+               "Reclaim Docker space from stopped containers and dangling data (reviewed)",
+               risk="host_mutate"),
+    Capability("docker", "exec",
+               ("docker exec", "inside the container", "in the container", "into the container",
+                "execute in the container", "shell into the container"),
+               ("docker", "exec", "container", "inside"),
+               "Run one argument-safe command inside a container (reviewed)",
+               risk="host_mutate"),
     Capability("git", "pull",
                ("git pull", "pull the latest", "pull from origin", "pull changes",
                 "update from remote"),
@@ -1046,6 +1115,9 @@ def intent_wants_host_mutate(intent: str) -> bool:
         r"merge (?:the )?[A-Za-z0-9._/-]+ ?(?:branch)?|"
         r"(?:revert|undo) (?:the |that |this )?commit|"
         r"clone (?:the |this )?(?:repo|repository|project)|"
+        r"(?:clean ?up|reclaim|prune)\s+(?:the\s+)?docker|docker (?:system )?prune|"
+        r"(?:restart|kill|pause|unpause|resume)\s+(?:the\s+)?[A-Za-z0-9._/-]*\s?containers?|"
+        r"(?:exec|run)\s+.{0,30}\s+(?:in|inside)\s+(?:the\s+)?containers?|"
         r"reset (?:the )?(?:branch|repo|repository|working tree|--?\w+)|"
         r"tag (?:this|the) (?:release|commit|version)|"
         r"discard (?:my |the )?(?:changes|edits)|"
@@ -2104,7 +2176,10 @@ def score_capability(intent: str, capability: Capability) -> int:
         score -= 50
     if capability.tool == "docker" and capability.operation == "containers" and "running" in text and "stopped" not in text:
         score -= 80
-    if capability.tool == "docker" and capability.operation in {"start", "stop"} and capability.operation in text and "container" in text:
+    if (capability.tool == "docker" and capability.operation in {"start", "stop"}
+            and re.search(rf"\b{capability.operation}\b", text) and "container" in text):
+        # A word boundary, not a substring: "restart the container" contains
+        # "start" and was answered by docker.start.
         score += 80
     if capability.tool == "git" and not phrase_hit and "git" not in text:
         score -= 80
