@@ -17,11 +17,13 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterator, TextIO
 
+from . import juicyfields
 from .juicy import (
     JuicyFinding,
     kind_category,
@@ -35,8 +37,10 @@ from .theme import PALETTE, paint
 # First-level folders under the scan root are treated as projects.
 REPORTS_DIR_NAME = "_juicy_reports"
 MANIFEST_NAME = "scan_manifest.json"
-MASTER_SUMMARY_NAME = "MASTER_SUMMARY.csv"
-ROTATION_REPORT_NAME = "ROTATION_REPORT.csv"
+# Kept so a caller can still recognise the two roll-up reports by shape; the
+# files themselves are stamped per run (see report_basename).
+MASTER_SUMMARY_NAME = "MASTER_SUMMARY"
+ROTATION_REPORT_NAME = "ROTATION"
 TERMINAL_SAMPLE = 80
 PER_FILE_FINDING_CAP = 50_000
 MAX_FILE_BYTES = 100 * 1024 * 1024
@@ -79,7 +83,8 @@ SCAN_EXTENSIONS = frozenset({
     ".dart", ".lua",
     ".r",
     ".cob", ".cbl", ".cpy",
-    ".asp", ".asa",
+    ".asp", ".asa", ".asax", ".aspx", ".ascx", ".ashx", ".asmx",
+    ".cshtml", ".vbhtml", ".razor",
     ".jsp", ".jspx",
     ".env", ".ini", ".cfg", ".conf", ".config", ".properties",
     ".toml", ".yaml", ".yml",
@@ -143,6 +148,45 @@ _ROTATION_RANK = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Report naming: _Juicy_<Project>_DD_MMM_YYYY_HHMM_IST
+# ---------------------------------------------------------------------------
+
+# India has no daylight saving, so a fixed offset is exact rather than a guess,
+# and it does not depend on the machine's own timezone being set correctly.
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
+REPORT_PREFIX = "_Juicy_"
+# Every file from one scan carries the same stamp, so a directory of reports
+# sorts and reads as runs rather than as loose files.
+_STAMP_FORMAT = "%d_%b_%Y_%H%M"
+_STAMP_RE = re.compile(r"_(\d{2}_[A-Za-z]{3}_\d{4}_\d{4}_IST)$")
+
+
+def report_stamp(when: datetime | None = None) -> str:
+    """DD_MMM_YYYY_HHMM_IST for the moment the scan started."""
+
+    moment = (when or datetime.now(timezone.utc)).astimezone(IST)
+    return moment.strftime(_STAMP_FORMAT) + "_IST"
+
+
+def report_basename(project: str, stamp: str) -> str:
+    return f"{REPORT_PREFIX}{safe_project_name(project)}_{stamp}"
+
+
+def stamp_of(path: Path) -> str:
+    """The scan stamp carried by a report file name, or empty when it has none."""
+
+    match = _STAMP_RE.search(path.stem)
+    return match.group(1) if match else ""
+
+
+def existing_stamp(reports_dir: Path) -> str:
+    """The most recent stamp already in this reports directory, for --resume."""
+
+    stamps = sorted({stamp_of(item) for item in reports_dir.glob(f"{REPORT_PREFIX}*.jsonl")})
+    return stamps[-1] if stamps and stamps[-1] else ""
+
+
 @dataclass
 class TreeScan:
     """Outcome of walking a source-code root."""
@@ -172,9 +216,46 @@ def safe_project_name(name: str) -> str:
     return cleaned[:120]
 
 
-def project_of(path: Path, root: Path) -> str:
-    """First-level folder under the scan root is the project; files at the root use the root name."""
+# Files that mean "this directory is an application", not "this directory holds
+# applications". An ASP.NET app is one project; splitting it on its own folders
+# turns Areas, Views and Scripts into four projects that do not exist.
+PROJECT_MARKERS = frozenset(name.casefold() for name in (
+    ".git", "package.json", "pyproject.toml", "setup.py", "setup.cfg",
+    "requirements.txt", "Pipfile", "poetry.lock", "pom.xml", "build.gradle",
+    "build.gradle.kts", "Cargo.toml", "go.mod", "composer.json", "Gemfile",
+    "Web.config", "App.config", "Global.asax", "appsettings.json",
+    "Dockerfile", "docker-compose.yml", "Makefile", "CMakeLists.txt",
+    "angular.json", "next.config.js", "vite.config.js", "tsconfig.json",
+))
+PROJECT_MARKER_SUFFIXES = (".csproj", ".sln", ".vbproj", ".fsproj", ".xcodeproj")
 
+
+def root_is_single_project(root: Path) -> bool:
+    """Is the scan root itself one application, rather than a folder of them?"""
+
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return False
+    for child in children:
+        if child.name.casefold() in PROJECT_MARKERS:
+            return True
+        if child.suffix.casefold() in PROJECT_MARKER_SUFFIXES:
+            return True
+    return False
+
+
+def project_of(path: Path, root: Path, *, single_project: bool | None = None) -> str:
+    """Name the project a file belongs to.
+
+    When the root is itself an application every file belongs to it. Otherwise
+    the root holds several projects and the first-level folder names each one.
+    """
+
+    if single_project is None:
+        single_project = root_is_single_project(root)
+    if single_project:
+        return root.name or "root"
     try:
         rel = path.relative_to(root)
     except ValueError:
@@ -244,6 +325,20 @@ def level_from_score(value: object) -> str:
     if score >= 60:
         return "medium"
     return "low"
+
+
+def apply_path_context(item: JuicyFinding, relative_path: str) -> JuicyFinding:
+    """Let the location argue about the finding, without ever silencing it.
+
+    A credential in `.env` matters more than the same string in `docs/`; neither
+    is dropped, because secrets leak into both.
+    """
+
+    points = juicyfields.path_adjustment(relative_path)
+    if not points:
+        return item
+    level = level_from_score(CONFIDENCE_SCORE.get(item.confidence, 45) + points)
+    return item if level == item.confidence else replace(item, confidence=level)
 
 
 def should_scan(path: Path, *, all_files: bool = False) -> bool:
@@ -342,12 +437,14 @@ def _chmod_private(path: Path) -> None:
             pass
 
 
-def _jsonl_path(reports_dir: Path, project: str) -> Path:
-    return reports_dir / f"{safe_project_name(project)}_report.jsonl"
+def _jsonl_path(reports_dir: Path, project: str, stamp: str = "") -> Path:
+    stamp = stamp or report_stamp()
+    return reports_dir / f"{report_basename(project, stamp)}.jsonl"
 
 
-def _csv_path(reports_dir: Path, project: str) -> Path:
-    return reports_dir / f"{safe_project_name(project)}_report.csv"
+def _csv_path(reports_dir: Path, project: str, stamp: str = "") -> Path:
+    stamp = stamp or report_stamp()
+    return reports_dir / f"{report_basename(project, stamp)}.csv"
 
 
 def finding_record(item: JuicyFinding, *, project: str, file: str) -> dict[str, object]:
@@ -370,9 +467,10 @@ def finding_record(item: JuicyFinding, *, project: str, file: str) -> dict[str, 
     }
 
 
-def _open_jsonl(reports_dir: Path, project: str, handles: dict[str, TextIO]) -> TextIO:
+def _open_jsonl(reports_dir: Path, project: str, handles: dict[str, TextIO],
+                stamp: str = "") -> TextIO:
     if project not in handles:
-        path = _jsonl_path(reports_dir, project)
+        path = _jsonl_path(reports_dir, project, stamp)
         handles[project] = path.open("a", encoding="utf-8")
         _chmod_private(path)
     return handles[project]
@@ -387,6 +485,11 @@ def _close_handles(handles: dict[str, TextIO]) -> None:
     handles.clear()
 
 
+# Stamp read back from the manifest a moment ago, so --resume appends to the
+# run it is resuming rather than starting a differently named one.
+_MANIFEST_STAMP: dict[str, str] = {}
+
+
 def _load_manifest(path: Path) -> dict[str, dict[str, int]]:
     if not path.is_file():
         return {}
@@ -397,6 +500,7 @@ def _load_manifest(path: Path) -> dict[str, dict[str, int]]:
     files = payload.get("files") if isinstance(payload, dict) else None
     if not isinstance(files, dict):
         return {}
+    _MANIFEST_STAMP[str(path)] = str(payload.get("stamp") or "")
     out: dict[str, dict[str, int]] = {}
     for key, meta in files.items():
         if isinstance(meta, dict) and "size" in meta and "mtime" in meta:
@@ -404,8 +508,9 @@ def _load_manifest(path: Path) -> dict[str, dict[str, int]]:
     return out
 
 
-def _save_manifest(path: Path, root: Path, files: dict[str, dict[str, int]]) -> None:
-    payload = {"root": str(root), "files": files}
+def _save_manifest(path: Path, root: Path, files: dict[str, dict[str, int]],
+                   stamp: str = "") -> None:
+    payload = {"root": str(root), "stamp": stamp, "files": files}
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _chmod_private(temporary)
@@ -461,7 +566,7 @@ def _iter_jsonl(path: Path) -> Iterator[dict[str, object]]:
 
 
 def iter_report_records(reports_dir: Path) -> Iterator[dict[str, object]]:
-    for path in sorted(reports_dir.glob("*_report.jsonl")):
+    for path in sorted(reports_dir.glob(f"{REPORT_PREFIX}*.jsonl")):
         yield from _iter_jsonl(path)
 
 
@@ -516,8 +621,8 @@ def _csv_row(record: dict[str, object]) -> tuple[object, ...]:
 
 def write_project_csvs(reports_dir: Path) -> list[Path]:
     written: list[Path] = []
-    for jsonl in sorted(reports_dir.glob("*_report.jsonl")):
-        csv_path = jsonl.with_name(jsonl.name.replace("_report.jsonl", "_report.csv"))
+    for jsonl in sorted(reports_dir.glob(f"{REPORT_PREFIX}*.jsonl")):
+        csv_path = jsonl.with_suffix(".csv")
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(CSV_COLUMNS)
@@ -528,8 +633,8 @@ def write_project_csvs(reports_dir: Path) -> list[Path]:
     return written
 
 
-def write_master_summary(reports_dir: Path) -> Path:
-    path = reports_dir / MASTER_SUMMARY_NAME
+def write_master_summary(reports_dir: Path, stamp: str = "") -> Path:
+    path = reports_dir / f"{REPORT_PREFIX}MASTER_SUMMARY_{stamp or report_stamp()}.csv"
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(CSV_COLUMNS)
@@ -539,7 +644,7 @@ def write_master_summary(reports_dir: Path) -> Path:
     return path
 
 
-def write_rotation_report(reports_dir: Path) -> Path:
+def write_rotation_report(reports_dir: Path, stamp: str = "") -> Path:
     """One row per secret identity: how many projects/files, where to rotate first."""
 
     groups: dict[str, dict[str, object]] = {}
@@ -586,7 +691,7 @@ def write_rotation_report(reports_dir: Path) -> Path:
             bucket["confidence"] = score
             bucket["severity"] = str(record.get("severity") or "")
 
-    path = reports_dir / ROTATION_REPORT_NAME
+    path = reports_dir / f"{REPORT_PREFIX}ROTATION_{stamp or report_stamp()}.csv"
     rows = []
     for fingerprint, bucket in groups.items():
         projects = bucket["projects"] if isinstance(bucket["projects"], set) else set()
@@ -620,10 +725,11 @@ def write_rotation_report(reports_dir: Path) -> Path:
     return path
 
 
-def finish_reports(reports_dir: Path) -> tuple[Path, Path, list[Path]]:
+def finish_reports(reports_dir: Path, stamp: str = "") -> tuple[Path, Path, list[Path]]:
+    stamp = stamp or existing_stamp(reports_dir) or report_stamp()
     project_csvs = write_project_csvs(reports_dir)
-    master = write_master_summary(reports_dir)
-    rotation = write_rotation_report(reports_dir)
+    master = write_master_summary(reports_dir, stamp)
+    rotation = write_rotation_report(reports_dir, stamp)
     return master, rotation, project_csvs
 
 
@@ -654,6 +760,15 @@ def scan_tree(
     deadline = time.monotonic() + timeout if timeout and timeout > 0 else None
     manifest_path = reports_dir / MANIFEST_NAME
     previous = _load_manifest(manifest_path) if resume else {}
+    # One stamp for the whole run, so every file of a scan carries the same
+    # timestamp; a resumed scan keeps the stamp of the run it is continuing.
+    run_stamp = ""
+    if resume:
+        run_stamp = _MANIFEST_STAMP.get(str(manifest_path)) or existing_stamp(reports_dir)
+    run_stamp = run_stamp or report_stamp()
+    # Decided once for the whole walk: an application is one project, a folder
+    # of applications is several.
+    single_project = root_is_single_project(root)
     next_manifest: dict[str, dict[str, int]] = dict(previous) if resume else {}
     handles: dict[str, TextIO] = {}
     sample: list[JuicyFinding] = []
@@ -691,9 +806,9 @@ def scan_tree(
 
     if resume:
         for project, drop_files in drop_by_project.items():
-            _strip_jsonl_files(_jsonl_path(reports_dir, project), drop_files)
+            _strip_jsonl_files(_jsonl_path(reports_dir, project, run_stamp), drop_files)
     else:
-        for old in reports_dir.glob("*_report.jsonl"):
+        for old in reports_dir.glob(f"{REPORT_PREFIX}*.jsonl"):
             old.unlink(missing_ok=True)
 
     try:
@@ -723,8 +838,11 @@ def scan_tree(
             scanned_bytes += scan.scanned_bytes
             scanned_lines += scan.scanned_lines
             next_manifest[rel] = stamp
-            handle = _open_jsonl(reports_dir, project, handles)
+            handle = _open_jsonl(reports_dir, project, handles, run_stamp)
             for item in scan.findings:
+                # Where the file lives is evidence too, so it is applied before
+                # the confidence filter rather than after the report is written.
+                item = apply_path_context(item, rel)
                 if not meets_confidence(item, min_confidence):
                     continue
                 handle.write(json.dumps(
@@ -749,7 +867,7 @@ def scan_tree(
         living = {relative_source(path, root) for path in iter_scan_files(root, all_files=all_files)}
         next_manifest = {key: value for key, value in next_manifest.items() if key in living}
 
-    _save_manifest(manifest_path, root, next_manifest)
+    _save_manifest(manifest_path, root, next_manifest, run_stamp)
 
     live_sample = sample
     sample = []
@@ -772,7 +890,7 @@ def scan_tree(
     if live_sample:
         sample = live_sample
 
-    finish_reports(reports_dir)
+    finish_reports(reports_dir, run_stamp)
     return TreeScan(
         findings=sorted(sample, key=lambda item: (item.source, item.line)),
         scanned_bytes=scanned_bytes,
@@ -792,12 +910,10 @@ def describe_tree_scan(result: TreeScan) -> str:
     lines = [
         paint(f"  reports: {result.reports_dir}", PALETTE.green),
     ]
+    stamp = existing_stamp(result.reports_dir)
     for project in result.projects:
-        name = safe_project_name(project)
-        lines.append(paint(
-            f"    {name}_report.jsonl  ·  {name}_report.csv",
-            PALETTE.muted,
-        ))
+        base = report_basename(project, stamp) if stamp else safe_project_name(project)
+        lines.append(paint(f"    {base}.jsonl  ·  {base}.csv", PALETTE.muted))
     extras = f"{result.files_scanned:,} file(s) · {result.finding_count:,} finding(s)"
     if result.files_resumed:
         extras += f" · {result.files_resumed:,} unchanged skipped"

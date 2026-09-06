@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, Sequence
 from urllib.parse import urlparse
 
+from . import juicyfields
 from .theme import PALETTE, color_enabled, paint
 
 
@@ -491,6 +492,13 @@ def _validate_swift(value: str, ctx: str) -> str | None:
     if not re.fullmatch(r"[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?", compact):
         return None
     hinted = bool(_BANK_HINT.search(ctx))
+    # A BIC's 5th and 6th characters are an ISO country code, and its location
+    # or branch code almost always carries a digit. ESTABLISHED satisfies the
+    # letter pattern and even the country code (BL), so without the digit test
+    # every netstat capture reports a bank code.
+    if not hinted and (compact[4:6] not in _ISO_COUNTRIES
+                       or not any(char.isdigit() for char in compact)):
+        return None
     if len(compact) == 11:
         return "high" if hinted else "medium"
     return "high" if hinted else None
@@ -521,6 +529,58 @@ def _validate_jwt(value: str, _ctx: str) -> str | None:
     if algorithm:
         return "high"
     return "medium"
+
+
+# ISO 3166-1 alpha-2, the 5th-6th characters of every BIC. Kept as a set rather
+# than a dependency so the check works on a machine with nothing installed.
+_ISO_COUNTRIES = frozenset("""
+AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL
+BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV
+CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD
+GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM
+IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK
+LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW
+MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR
+PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS
+ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY
+UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW
+""".split())
+
+# The suffixes that actually turn up in source and captures. Every two-letter
+# label is treated as a country code, which covers the rest without a list.
+_COMMON_TLDS = frozenset("""
+com org net edu gov mil int info biz name pro app dev io co ai cloud tech online
+site web xyz store shop live life world today news blog wiki page link click
+email systems services solutions network host hosting digital agency studio
+media group team works company enterprises industries global international
+local internal corp lan intranet test example invalid localhost onion
+""".split())
+
+
+def _validate_domain(value: str, ctx: str) -> str | None:
+    """Tell a hostname from a dotted identifier in code.
+
+    `System.Environment.GetEnvironmentVariable` has the shape of a domain and is
+    a method call. Hostnames are case-insensitive and written in one case; code
+    is camelCase, and that is the difference worth using — no TLD list needed,
+    so a new suffix is never reported as unknown.
+    """
+
+    label = value.rsplit(".", 1)[-1]
+    if not label.isalpha() or len(label) > 24:
+        return None
+    # A hostname ends in a public suffix. Without that test every `item.value`
+    # and `config.settings` in the codebase is reported as a host.
+    if label.casefold() not in _COMMON_TLDS and len(label) != 2:
+        return None
+    if not (label.islower() or label.isupper()):
+        return None
+    if any(part[:1].isupper() and not part.isupper() for part in value.split(".")[:-1]):
+        return None
+    # A name that is immediately called is a function, not a host.
+    if f"{value}(" in ctx:
+        return None
+    return "low"
 
 
 def _validate_ipv4(value: str, _ctx: str) -> str | None:
@@ -574,38 +634,44 @@ def _validate_db_uri(value: str, _ctx: str) -> str | None:
     return "medium"
 
 
-def _validate_password(value: str, _ctx: str) -> str | None:
-    if _is_placeholder(value):
-        return None
-    return "high"
+def _line_around(context: str, value: str) -> str:
+    """The line the candidate sits on, found by locating the candidate itself.
+
+    The window is clipped at the start of a file, so the candidate is not always
+    in the middle of it — taking the middle line read the *next* line near the
+    top of a file and judged the candidate on someone else's words.
+    """
+
+    if not context:
+        return ""
+    index = context.find(value) if value else -1
+    if index < 0:
+        index = len(context) // 2
+    start = context.rfind("\n", 0, index) + 1
+    end = context.find("\n", index)
+    return context[start:] if end < 0 else context[start:end]
 
 
-def _validate_username(value: str, _ctx: str) -> str | None:
-    if _is_placeholder(value) or len(value) < 2:
-        return None
-    return "medium"
+def _field_secret(kind: str) -> Callable[[str, str], str | None]:
+    """Score a name-and-assignment candidate instead of trusting the name.
+
+    `password = os.getenv("DB_PASSWORD")` names a secret; `password = "Xv9!q"`
+    is one. Only the second is a hard-coded credential, and the score says so.
+    """
+
+    def validate(value: str, ctx: str) -> str | None:
+        score, _origin, _cleaned = juicyfields.score_field_secret(
+            value=value, context=ctx, line=_line_around(ctx, value), kind=kind)
+        return juicyfields.level_for(score)
+
+    return validate
 
 
-def _validate_secret(value: str, ctx: str) -> str | None:
-    if _is_placeholder(value):
-        return None
-    if value.casefold() in _WEAK_SECRETS:
-        return "high"
-    score = 0
-    if _SECRET_HINT.search(ctx):
-        score += 2
-    entropy = _entropy(value)
-    if len(value) >= 16 and entropy >= 3.5:
-        score += 2
-    elif len(value) >= 24 and entropy >= 4.0:
-        score += 3
-    elif len(value) >= 8:
-        score += 1
-    if score >= 4:
-        return "high"
-    if score >= 2:
-        return "medium"
-    return "low"
+_validate_password = _field_secret("password")
+_validate_username = _field_secret("username")
+
+
+_validate_secret = _field_secret("secret")
 
 
 def _validate_indian_phone(value: str, _ctx: str) -> str | None:
@@ -777,18 +843,25 @@ _SPECS: tuple[_Spec, ...] = (
      0, _accept("low")),
     ("domain", "network",
      re.compile(r"(?<![@\w-])(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}\b", re.I),
-     0, _accept("low")),
+     0, _validate_domain),
+    # Field-named credentials. An alias at a word boundary plus an assignment is
+    # the candidate; the value's origin decides whether it is a finding at all.
     ("password", "authentication",
-     re.compile(r"(?im)\b(?:password|passwd|pwd)[\"']?\s*[:=]\s*[\"']?([^\s,;\"'\]}]+)"),
-     1, _validate_password),
+     juicyfields.assignment_pattern(juicyfields.PASSWORD_GROUP), "value", _validate_password),
+    ("password", "authentication",
+     juicyfields.xml_element_pattern(juicyfields.PASSWORD_GROUP), "value", _validate_password),
+    ("password", "authentication",
+     juicyfields.xml_attribute_pattern(juicyfields.PASSWORD_GROUP), "value", _validate_password),
     ("username", "identity",
-     re.compile(r"(?im)\b(?:username|user|login)[\"']?\s*[:=]\s*[\"']?([^\s,;\"'\]}]+)"),
-     1, _validate_username),
+     juicyfields.assignment_pattern(juicyfields.USERNAME_GROUP), "value", _validate_username),
+    ("username", "identity",
+     juicyfields.xml_element_pattern(juicyfields.USERNAME_GROUP), "value", _validate_username),
     ("secret", "secret",
-     re.compile(r"(?im)\b(?:api[_-]?key|client[_-]?secret|secret|token|access[_-]?token|"
-                r"refresh[_-]?token|auth[_-]?token|private[_-]?key)"
-                r"[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_./+~=-]{8,})"),
-     1, _validate_secret),
+     juicyfields.assignment_pattern(juicyfields.SECRET_GROUP), "value", _validate_secret),
+    ("secret", "secret",
+     juicyfields.xml_element_pattern(juicyfields.SECRET_GROUP), "value", _validate_secret),
+    ("secret", "secret",
+     juicyfields.xml_attribute_pattern(juicyfields.SECRET_GROUP), "value", _validate_secret),
     ("session-cookie", "authentication",
      re.compile(r"""(?i)\b(?:PHPSESSID|JSESSIONID|ASP\.NET_SessionId|sessionid|
                             connect\.sid)=([A-Za-z0-9._-]{8,})"""),
@@ -842,9 +915,14 @@ _JUICY_REQUEST = re.compile(
     re.IGNORECASE,
 )
 
-JUICY_KIND_NAMES = tuple(kind for kind, _category, _pattern, _group, _validate in _SPECS)
+# One kind can have several syntaxes (a password in Python, in XML, in an
+# attribute), so the kind list is deduplicated and priority is the first spec.
+JUICY_KIND_NAMES = tuple(dict.fromkeys(
+    kind for kind, _category, _pattern, _group, _validate in _SPECS))
 _KIND_CATEGORY = {kind: category for kind, category, _pattern, _group, _validate in _SPECS}
-_PRIORITY = {kind: index for index, (kind, *_rest) in enumerate(_SPECS)}
+_PRIORITY: dict[str, int] = {}
+for _index, (_kind, *_rest) in enumerate(_SPECS):
+    _PRIORITY.setdefault(_kind, _index)
 _FAMILY_COLOR = {
     "identity": PALETTE.juicy_id,
     "financial": PALETTE.juicy_money,
@@ -874,6 +952,46 @@ REMOTE_REDACT_KINDS = frozenset({
 })
 
 
+# Kinds that name who you are, and kinds that let you prove it. One of each in
+# the same block is a working credential, which is worth more than the sum.
+# Only a *field-assigned* identity counts: an address that merely appears on the
+# same line as a password is prose, not the other half of a login.
+_IDENTITY_KINDS = frozenset({"username"})
+_PROOF_KINDS = frozenset({"password", "secret", "bearer", "basic-auth", "jwt"})
+_PAIR_LINE_WINDOW = 5
+
+
+def _correlate_credentials(findings: list[JuicyFinding]) -> list[JuicyFinding]:
+    """Raise a username and a password found together to what they really are.
+
+    Separately they are a name and a string. Within a few lines of each other
+    they are an account someone can log in with, so both are upgraded once.
+    """
+
+    proofs = [item for item in findings if item.kind in _PROOF_KINDS]
+    names = [item for item in findings if item.kind in _IDENTITY_KINDS]
+    if not proofs or not names:
+        return findings
+    paired: set[int] = set()
+    for name in names:
+        for proof in proofs:
+            if abs(proof.line - name.line) <= _PAIR_LINE_WINDOW:
+                paired.add(id(name))
+                paired.add(id(proof))
+    if not paired:
+        return findings
+    return [replace(item, confidence=_raise_confidence(item.confidence))
+            if id(item) in paired else item for item in findings]
+
+
+def _raise_confidence(level: str) -> str:
+    order = ("low", "medium", "high", "critical")
+    try:
+        return order[min(order.index(level) + 1, len(order) - 1)]
+    except ValueError:
+        return level
+
+
 def detect_juicy(text: str) -> list[JuicyFinding]:
     """Detect high-value identifiers, credentials, keys, endpoints, and signals."""
 
@@ -889,15 +1007,26 @@ def detect_juicy(text: str) -> list[JuicyFinding]:
             nearby = _context(text, start, end)
             confidence = "high"
             if validate is not None:
+                # The raw value is what carries the origin: quotes, an `f` prefix
+                # and `${...}` all decide whether this is a secret at all, so it
+                # is judged before anything is trimmed off it.
                 scored = validate(value, nearby)
                 if not scored:
                     continue
                 confidence = scored
+            if group == "value":
+                # Report the credential, not the quotes around it, so the same
+                # secret fingerprints identically however it was written.
+                stripped = juicyfields.unquote(value)
+                if stripped != value:
+                    offset = value.find(stripped)
+                    start, end = start + offset, start + offset + len(stripped)
+                value = stripped
             candidates.append(JuicyFinding(
                 kind, value, start, end, text.count("\n", 0, start) + 1,
                 confidence, category, context=line_snippet(text, start, end),
             ))
-    accepted = _resolve_overlaps(candidates)
+    accepted = _correlate_credentials(_resolve_overlaps(candidates))
     seen = {(item.kind, item.value) for item in accepted}
     extra: list[JuicyFinding] = []
     for item in _csv_column_findings(text):
@@ -930,6 +1059,39 @@ def _column_kind(name: str) -> tuple[str, str]:
     return "secret", "secret"
 
 
+# A column name is a label: short, no punctuation soup, not a sentence.
+_COLUMN_NAME = re.compile(r"^[\w .#/()-]{1,40}$")
+_HEADER_ROWS_CHECKED = 200
+
+
+def _looks_like_a_header(header: list[str]) -> bool:
+    """Is this really a header row, or is it prose that happens to have commas?
+
+    A docstring opening "What the user asked for, turned into things that can be
+    checked" was read as a CSV header, which turned every following line of that
+    file into a credential. A header is several short labels, and the rows below
+    it agree on how many there are.
+    """
+
+    fields = [name.strip() for name in header]
+    if len(fields) < 2 or any(not name for name in fields):
+        return False
+    if not all(_COLUMN_NAME.match(name) for name in fields):
+        return False
+    return all(len(name.split()) <= 4 for name in fields)
+
+
+def _hint_columns(header: list[str]) -> list[int]:
+    """Columns whose *name* carries a credential word, token by token."""
+
+    found: list[int] = []
+    for index, name in enumerate(header):
+        tokens = [part for part in re.split(r"[^A-Za-z0-9]+", name.casefold()) if part]
+        if any(hint in token for token in tokens for hint in _COLUMN_HINTS):
+            found.append(index)
+    return found
+
+
 def _csv_column_findings(text: str) -> list[JuicyFinding]:
     """Credential-named CSV columns (password, api_key, …) even without key=value."""
 
@@ -939,17 +1101,24 @@ def _csv_column_findings(text: str) -> list[JuicyFinding]:
     try:
         reader = csv.reader(io.StringIO(text))
         header = next(reader)
+        rows = [row for _index, row in zip(range(_HEADER_ROWS_CHECKED), reader)]
     except (csv.Error, StopIteration):
         return []
-    indexes = [index for index, name in enumerate(header)
-               if any(hint in name.casefold() for hint in _COLUMN_HINTS)]
+    if not _looks_like_a_header(header) or not rows:
+        return []
+    # Rows in a table agree with their header on how many columns there are;
+    # lines of source code split on commas do not.
+    width = len(header)
+    if sum(1 for row in rows if len(row) == width) < max(1, int(len(rows) * 0.8)):
+        return []
+    indexes = _hint_columns(header)
     if not indexes:
         return []
     offset = 0
     # Approximate line starts so "where" can still say a row number.
     findings: list[JuicyFinding] = []
     line = 2
-    for row in reader:
+    for row in rows:
         for index in indexes:
             if index >= len(row):
                 continue

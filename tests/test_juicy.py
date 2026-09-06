@@ -141,9 +141,15 @@ class DetectorValidatorTests(unittest.TestCase):
         self.assertNotIn(PALETTE.juicy_signal, cors_only)
 
     def test_confidence_filter(self) -> None:
+        # A short literal with nothing else arguing for it scores medium: alias,
+        # literal assignment and active code, and no entropy, file or pair bonus.
         finding = detect_juicy("password=s3cret")[0]
-        self.assertTrue(meets_confidence(finding, "high"))
-        self.assertFalse(meets_confidence(finding, "critical"))
+        self.assertTrue(meets_confidence(finding, "medium"))
+        self.assertFalse(meets_confidence(finding, "high"))
+        # Context is what lifts it: a username beside it makes it a login.
+        paired = [item for item in detect_juicy('username="svc_prod"\npassword=s3cret')
+                  if item.kind == "password"][0]
+        self.assertTrue(meets_confidence(paired, "high"))
 
     def test_plain_questions_map_onto_juicy_kinds(self) -> None:
         from tacu.juicy import parse_juicy_question, value_matches_needles
@@ -527,6 +533,20 @@ class DetectorValidatorTests(unittest.TestCase):
             self.assertNotIn("No juicy values", shown)
 
 
+def only_report(reports: Path, project: str, suffix: str) -> Path:
+    """The single stamped report for a project: _Juicy_<Project>_DD_MMM_YYYY_HHMM_IST."""
+
+    found = sorted(reports.glob(f"_Juicy_{project}_*{suffix}"))
+    assert len(found) == 1, f"expected one {project}{suffix}, found {[p.name for p in found]}"
+    return found[0]
+
+
+def roll_up(reports: Path, marker: str) -> Path:
+    found = sorted(reports.glob(f"_Juicy_{marker}_*.csv"))
+    assert len(found) == 1, f"expected one {marker}, found {[p.name for p in found]}"
+    return found[0]
+
+
 class TreeScannerTests(unittest.TestCase):
     def test_should_scan_source_config_ci_and_skip_binaries(self) -> None:
         from tacu.juicyscan import should_scan
@@ -575,7 +595,7 @@ class TreeScannerTests(unittest.TestCase):
 
     def test_tree_writes_per_project_reports_and_rotation(self) -> None:
         from tacu import cli
-        from tacu.juicyscan import MASTER_SUMMARY_NAME, ROTATION_REPORT_NAME
+        from tacu.juicyscan import MASTER_SUMMARY_NAME, ROTATION_REPORT_NAME, stamp_of
         from tacu.juicy import secret_fingerprint
 
         with tempfile.TemporaryDirectory() as directory:
@@ -609,25 +629,28 @@ class TreeScannerTests(unittest.TestCase):
             self.assertIn("payment-service/config.yml", body)
             self.assertNotIn("node_modules", body)
             reports = root / "_juicy_reports"
-            self.assertTrue((reports / "payment-service_report.jsonl").is_file())
-            self.assertTrue((reports / "payment-service_report.csv").is_file())
-            self.assertTrue((reports / "mobile-app_report.jsonl").is_file())
-            self.assertTrue((reports / "mobile-app_report.csv").is_file())
-            self.assertTrue((reports / MASTER_SUMMARY_NAME).is_file())
-            rotation = reports / ROTATION_REPORT_NAME
-            self.assertTrue(rotation.is_file())
+            payment_jsonl = only_report(reports, "payment-service", ".jsonl")
+            only_report(reports, "payment-service", ".csv")
+            only_report(reports, "mobile-app", ".jsonl")
+            only_report(reports, "mobile-app", ".csv")
+            master_path = roll_up(reports, MASTER_SUMMARY_NAME)
+            rotation = roll_up(reports, ROTATION_REPORT_NAME)
+            # Every file of one scan carries the same run stamp.
+            stamps = {stamp_of(item) for item in reports.glob("_Juicy_*")}
+            self.assertEqual(len(stamps), 1, stamps)
+            self.assertRegex(stamps.pop(), r"^\d{2}_[A-Za-z]{3}_\d{4}_\d{4}_IST$")
             rotation_text = rotation.read_text(encoding="utf-8")
             self.assertIn("SECRET_TYPE", rotation_text)
             self.assertIn(secret_fingerprint("aws-access-key", "AKIAIOSFODNN7EXAMPLE"),
                           rotation_text)
             self.assertIn("aws-access-key", rotation_text)
-            master = (reports / MASTER_SUMMARY_NAME).read_text(encoding="utf-8")
+            master = master_path.read_text(encoding="utf-8")
             self.assertIn("PROJECT,FILE,LINE,PACKET,ITEM,CATEGORY,DETECTOR,SEVERITY,CONFIDENCE,"
                           "VALUE,CONTEXT,SHA256_FINGERPRINT",
                           master.splitlines()[0].replace(" ", ""))
             self.assertIn("payment-service", master)
             self.assertIn("AKIAIOSFODNN7EXAMPLE", master)
-            jsonl = (reports / "payment-service_report.jsonl").read_text(encoding="utf-8")
+            jsonl = payment_jsonl.read_text(encoding="utf-8")
             self.assertIn("AKIAIOSFODNN7EXAMPLE", jsonl)
             aws = next(json.loads(line) for line in jsonl.splitlines()
                        if json.loads(line).get("detector") == "aws-access-key")
@@ -645,7 +668,7 @@ class TreeScannerTests(unittest.TestCase):
             combined = out.read_text(encoding="utf-8")
             self.assertIn("VALUE", combined.splitlines()[0])
             self.assertIn("AKIAIOSFODNN7EXAMPLE", combined)
-            self.assertIn("payment-service_report.jsonl", body)
+            self.assertIn(f"_Juicy_payment-service_{stamp_of(payment_jsonl)}.jsonl", body)
 
     def test_reports_keep_secrets_in_the_clear(self) -> None:
         from tacu import cli
@@ -663,8 +686,9 @@ class TreeScannerTests(unittest.TestCase):
                  redirect_stdout(shown):
                 self.assertEqual(cli.main(["juicy", str(root)]), 0)
             self.assertIn(key, shown.getvalue())
-            jsonl = (root / "_juicy_reports" / "api_report.jsonl").read_text(encoding="utf-8")
-            csv_text = (root / "_juicy_reports" / "api_report.csv").read_text(encoding="utf-8")
+            reports = root / "_juicy_reports"
+            jsonl = only_report(reports, "api", ".jsonl").read_text(encoding="utf-8")
+            csv_text = only_report(reports, "api", ".csv").read_text(encoding="utf-8")
             self.assertIn(key, jsonl)
             self.assertIn(key, csv_text)
             self.assertNotIn("AKIA***MPLE", jsonl)

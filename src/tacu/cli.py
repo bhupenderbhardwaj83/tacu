@@ -1213,6 +1213,18 @@ def _juicy_how(how: str, *, kinds: frozenset[str] | None = None,
     return " · ".join(parts)
 
 
+def _roll_up_report_paths(reports_dir: Path) -> tuple[str, str]:
+    """The two roll-up reports of the run that just finished, by their real names."""
+
+    from .juicyscan import MASTER_SUMMARY_NAME, REPORT_PREFIX, ROTATION_REPORT_NAME
+
+    def newest(marker: str) -> str:
+        found = sorted(reports_dir.glob(f"{REPORT_PREFIX}{marker}_*.csv"))
+        return str(found[-1]) if found else ""
+
+    return newest(MASTER_SUMMARY_NAME), newest(ROTATION_REPORT_NAME)
+
+
 def _print_needle_verdict(needles: tuple[str, ...],
                           hits: list | tuple) -> None:
     label = " / ".join(needles)
@@ -3921,11 +3933,9 @@ def _run_juicy_tree_extract(
         PALETTE.green,
     ))
     print(describe_tree_scan(result))
-    print(paint(
-        f"  master: {result.reports_dir / MASTER_SUMMARY_NAME}  ·  "
-        f"rotation: {result.reports_dir / ROTATION_REPORT_NAME}",
-        PALETTE.muted,
-    ))
+    master, rotation = _roll_up_report_paths(result.reports_dir)
+    if master or rotation:
+        print(paint(f"  master: {master}  ·  rotation: {rotation}", PALETTE.muted))
     if combined is not None:
         print(paint(f"  copy: {output}", PALETTE.muted))
     print(paint(

@@ -2,6 +2,55 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.10] - 2026-09-06
+
+### Changed
+
+- Juicy reports are named for the project and the run:
+  `_Juicy_<Project>_DD_MMM_YYYY_HHMM_IST`. Every file written by one scan carries
+  the same stamp, including the master summary and the rotation report, and a
+  resumed scan keeps the stamp of the run it is continuing. The time is Indian
+  Standard Time regardless of the machine's own timezone.
+- A directory that is itself an application is now one project. An ASP.NET app
+  was being split into `Areas`, `Views`, `Scripts` and the root, producing four
+  reports for one codebase. A folder that holds several repositories still
+  reports one project per repository.
+- Credential detection no longer works from exact field names. A candidate is an
+  alias at a word boundary, an assignment, and a value — and the value is then
+  classified before anything is reported. `pw`, `pwd`, `pass`, `passphrase`,
+  `db_password`, `SmtpPassword` and `<password>` are all found; `bypass`,
+  `compass` and `passenger_count` are not.
+- Confidence is now an additive score rather than a fixed level per pattern:
+  the alias, the assignment, the value's randomness, the surrounding words and
+  the file's location each move it. A username beside a password is reported as
+  the login it is.
+
+### Fixed
+
+- `password = os.getenv("DB_PASSWORD")` was reported as a hard-coded password,
+  and so were `config.password`, `get_secret()`, `"${DB_PASSWORD}"`, `changeme`
+  and `REPLACE_ME`. A value is now classified as a literal, an environment read,
+  a reference, a call or a placeholder, and only a literal can be a secret.
+- Any first line containing a comma was read as a CSV header, so a Python
+  docstring turned every following line of that file into a credential. A header
+  now has to look like one, and the rows below it have to agree on how many
+  columns there are. Scanning TACU's own source fell from 4,087 findings to 221,
+  with none of the remaining ones a credential false positive.
+- An assignment could run past the end of its line, so `if executable ==
+  "uname":` took the next line's `return` as a username. `==` is also no longer
+  read as an assignment.
+- A negative word anywhere in the surrounding window silenced a real finding: a
+  `maxTokens` on the following line hid the password above it. Only the
+  candidate's own line can disqualify it.
+- `example.com` on the same line as a credential suppressed it, because the word
+  "example" was read as documentation wording.
+- Dotted identifiers were reported as hostnames — `os.path.join`, `item.value`
+  and `System.Environment.GetEnvironmentVariable`. A hostname now needs a real
+  public suffix, and a name that is immediately called is a function.
+- `ESTABLISHED` in netstat output was reported as a SWIFT bank code.
+- ASP.NET view and handler files (`.cshtml`, `.aspx`, `.ascx`, `.asax`,
+  `.razor`) were not scanned at all.
+
 ## [0.3.9] - 2026-09-06
 
 ### Changed
