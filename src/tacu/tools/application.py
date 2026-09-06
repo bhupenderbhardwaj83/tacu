@@ -56,6 +56,21 @@ def _query_tokens(name: str) -> list[str]:
             if len(word) >= 3 and word not in _APP_QUERY_NOISE]
 
 
+def _bundle_identifier(path: Path) -> str:
+    """The reverse-DNS id, which carries the vendor the display name often omits."""
+
+    plist_path = path / "Contents" / "Info.plist"
+    if not plist_path.is_file():
+        return ""
+    try:
+        import plistlib
+
+        with plist_path.open("rb") as handle:
+            return str(plistlib.load(handle).get("CFBundleIdentifier") or "")
+    except Exception:
+        return ""
+
+
 def _match_rank(path: Path, name: str) -> int:
     """How well a bundle answers to what was asked. Zero means it does not.
 
@@ -78,6 +93,13 @@ def _match_rank(path: Path, name: str) -> int:
         return 0
     hits = [word for word in tokens if word in stem]
     if not hits:
+        # CrowdStrike ships Falcon.app but identifies as com.crowdstrike.falcon, so
+        # the vendor is recorded even when the name omits it.
+        identifier = _bundle_identifier(path).casefold()
+        if identifier and all(word in identifier for word in tokens):
+            return 50
+        if identifier and any(len(word) >= 5 and word in identifier for word in tokens):
+            return 30
         return 0
     if len(hits) == len(tokens):
         return 60
@@ -109,6 +131,10 @@ def _find_apps(name: str, limit: int = 10) -> list[Path]:
                 found.append((rank, child))
     # Rank before truncating, so a close match is never lost to an early weak one.
     found.sort(key=lambda pair: (-pair[0], pair[1].stem.casefold()))
+    # A vendor hint buried in a bundle id is only interesting while nothing better
+    # answers: "Google Chrome" should not also report a different Google product.
+    if found and found[0][0] >= 60:
+        found = [pair for pair in found if pair[0] >= 50]
     return [child for _rank, child in found[:limit]]
 
 
@@ -230,6 +256,14 @@ def execute(context: ToolContext, *, operation: str, name: str = "", url: str = 
     if not needle:
         raise ToolFailure("application find/version/running require name.", code="invalid_arguments")
     apps = [_bundle_metadata(path, dates=operation == "metadata") for path in _find_apps(needle, cap)]
+    suggestions: list[str] = []
+    if not apps:
+        # "flacon" is a typo for something installed; saying so beats a dead end.
+        import difflib
+
+        names = {item.stem.casefold(): item.stem for item in _list_apps(400)}
+        suggestions = [names[key] for key in
+                       difflib.get_close_matches(needle.casefold(), list(names), n=3, cutoff=0.6)]
     if operation in {"find", "version", "metadata"}:
         first = apps[0] if apps else {}
         return {
@@ -238,6 +272,7 @@ def execute(context: ToolContext, *, operation: str, name: str = "", url: str = 
             "query": name,
             "applications": apps,
             "count": len(apps),
+            "did_you_mean": suggestions or None,
             "version": first.get("version"),
             "path": first.get("path"),
             "created": first.get("created"),

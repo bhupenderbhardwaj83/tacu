@@ -2,6 +2,45 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.3.9] - 2026-09-06
+
+### Changed
+
+- Looking at your own machine no longer needs a review step. `ti do` now runs a plan
+  whose every step is read-only without asking for approval, so "is docker installed",
+  "what is in this folder" and "how much disk space is free" read the same under
+  `ti ask`, `ti auto` and `ti do`. Anything the policy will not run unattended —
+  including sensitive paths — is still reviewed exactly as before.
+- A question phrased in the user's own words now reaches the same tool as the catalog's
+  own phrasing. "what files are in this directory" no longer needs to be said as
+  "list directory". This applies only to read-only capabilities, only when nothing
+  else matched, and only when two of the question's nouns point the same way, so
+  "list the widget inventory" still means nothing to TACU.
+
+### Fixed
+
+- "is docker installed" was answered by the container catalog and then sent back for
+  replanning twice before giving the same answer. A question about whether something is
+  installed, where it lives, or which version it is, is a question about the application
+  bundle, and is now routed and judged as one.
+- A single application was described three times over, once per lookup, with the three
+  records appearing to contradict each other. One question about one application now
+  produces one statement, and it leads with what was asked: the version for a version
+  question, the date for an install-date question, yes or no for "is it installed".
+- A misspelt name reached a dead end. "is flacon installed" now answers with the closest
+  installed name.
+- "what is the version of Google Chrome" also reported an unrelated Google product,
+  matched through a vendor hint in its bundle id. A weak vendor match is now only
+  considered when nothing better answers.
+- "what operating system version am i running" was answered with the version of the first
+  bundle in /Applications, because "system version" was read as an application name.
+- A disk question was answered with a pasted `df` table and a question about uptime was
+  answered with the platform string. Both now lead with the number that was asked for.
+- Answers sometimes contained words in Devanagari or another script the question never
+  used — drift from the local multilingual model. The harness now detects a script the
+  question did not use and asks for the answer again, and the answer writer is told to
+  reply in the language it was asked in.
+
 ## [0.3.8] - 2026-09-06
 
 ### Fixed

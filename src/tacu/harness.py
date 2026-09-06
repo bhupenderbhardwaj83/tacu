@@ -17,7 +17,7 @@ from .core import TacuError
 from .routing import (
     CAPABILITIES, Capability, connection_state_from_intent,
     extract_file_delete, extract_file_write, file_edit_target, intent_content_needles,
-    intent_is_delete, intent_is_file_edit,
+    intent_is_application_query, intent_is_delete, intent_is_file_edit,
     intent_is_site_create, intent_tool_family, TOOL_FAMILIES,
     intent_host_domain, intent_wants_host_mutate, intent_writes_or_serves, native_steps_for_intent, prefers_coding_write,
     score_capability, script_body_for_intent, workspace_run_from_intent,
@@ -720,7 +720,11 @@ def critique_goal(intent: str, results: list[dict[str, Any]], *,
     domain = intent_host_domain(intent)
     if domain:
         used = {_result_tool(item) for item in results}
-        if domain not in used:
+        # "is docker installed" names Docker Desktop, and the application tool is
+        # the right answer to it. Demanding the docker catalog here sent a correct
+        # plan back for replanning twice before giving the same answer anyway.
+        answered_as_application = "application" in used and intent_is_application_query(intent)
+        if domain not in used and not answered_as_application:
             return WRONG_OPERATION
     text = intent.casefold()
     state = connection_state_from_intent(intent)

@@ -48,6 +48,30 @@ def intent_host_domain(intent: str) -> str | None:
     return None
 
 
+# A plain question about the machine: it wants to look, not to change anything.
+# The catalog lists one phrasing per capability ("list directory"), but people ask
+# in their own words ("what files are in this directory"). Requiring the catalog's
+# exact phrase is what makes a discovery tool feel undiscoverable, and looking at
+# something the user already owns carries no risk that would justify the friction.
+_VIEW_QUESTION = re.compile(
+    r"(?i)^\s*(?:what|which|where|when|who|whose|how|is|are|was|were|do|does|did|can|could)\b"
+    # No "print": code says print(x) far more often than a person asks to print one.
+    r"|\b(?:show|list|display|tell me|give me|view|check|look up|find out)\b")
+_CHANGES_SOMETHING = re.compile(
+    r"(?i)\b(?:create|write|make|delete|remove|install|uninstall|start|stop|restart|kill|"
+    r"launch|move|rename|copy|change|set|update|upgrade|edit|serve|deploy|push|commit|"
+    r"replace|swap|append|insert|refactor|fix|patch|generate|build|run|execute)\b")
+
+
+def intent_is_view_question(intent: str) -> bool:
+    """True when the ask only wants to look at something already on this machine."""
+
+    text = normalize_intent_text(intent)
+    if _CHANGES_SOMETHING.search(text):
+        return False
+    return bool(_VIEW_QUESTION.search(text))
+
+
 def intent_is_site_create(intent: str) -> bool:
     """True only for create/serve of a website — not merely mentioning index.html."""
 
@@ -242,7 +266,8 @@ _EXPLANATORY = re.compile(
     r"(?i)(?:"
     r"\bexplain\b|\bexplanation\b|"
     r"\bdifference between\b|"
-    r"\bhow (?:does|do|would|can) .*\bwork\b|"
+    r"\bhow (?:does|do|would|can|should|to)\b|"
+    r"\blet me know how\b|\btell me how\b|\bwhat is the way\b|"
     r"\bwhy (?:does|do|is|are|would)\b|"
     r"\bwhat (?:does|do) .*\bmean\b|"
     r"\bmeaning of\b|"
@@ -713,16 +738,20 @@ CAPABILITIES: tuple[Capability, ...] = (
                ("hardware", "model"),
                "Report Mac hardware overview"),
     Capability("system", "uptime",
-               ("system uptime", "how long has", "boot time", "how long up"),
-               ("uptime",),
+               ("system uptime", "uptime", "how long has", "boot time", "how long up",
+                "how long since", "last reboot"),
+               ("uptime", "boot", "reboot"),
                "Report system uptime"),
     Capability("system", "environment",
                ("environment variable", "env var", "printenv", "what is my path"),
                ("environment", "env"),
                "Inspect environment variables"),
     Capability("filesystem", "list",
-               ("list files", "list directory", "ls the", "directory listing"),
-               ("list", "directory"),
+               ("list files", "list directory", "ls the", "directory listing",
+                "what files", "files in this", "files in the current", "contents of this",
+                "directory structure", "folder structure", "what is in this directory",
+                "what is in this folder"),
+               ("list", "directory", "folder", "files", "contents"),
                "List files in a directory"),
     Capability("filesystem", "size",
                ("how big is the file", "file size", "bytes of"),
@@ -1014,6 +1043,14 @@ _APP_NAME_STOPWORDS = {
     "that", "the", "this", "a", "an", "any", "in", "on", "my", "is", "are",
     "folder", "directory", "file", "files", "apps", "application", "applications",
 }
+# A phrase ending in one of these names a place on disk, not an application:
+# "the path of this directory" is a filesystem question wearing the same words.
+_NOT_AN_APP_TAIL = {
+    "directory", "directories", "folder", "folders", "dir", "file", "files",
+    "path", "paths", "repo", "repos", "repository", "workspace", "project",
+    "drive", "disk", "volume", "download", "downloads", "desktop", "documents",
+    "computer", "machine", "mac", "laptop", "system", "host",
+}
 
 
 def connection_state_from_intent(intent: str) -> str:
@@ -1075,12 +1112,21 @@ def _clean_app_name(raw: str) -> str:
     if _URL_IN_INTENT.search(name):
         name = _URL_IN_INTENT.sub("", name).strip()
     lowered = name.casefold()
-    if lowered in _APP_NAME_STOPWORDS or lowered in _PRONOUNS:
+    if lowered in _APP_NAME_STOPWORDS or lowered in _PRONOUNS or lowered in _NOT_AN_APP:
+        return ""
+    if lowered.split()[-1] in _NOT_AN_APP if lowered.split() else False:
         return ""
     # "run program.py" runs a script; only a bundle is named like a file.
     if "/" in name or (re.search(r"\.[A-Za-z0-9]{1,8}$", name) and not lowered.endswith(".app")):
         return ""
     return name
+
+
+# Generic nouns that describe a place or thing, never an application.
+_NOT_AN_APP = frozenset((
+    "directory", "folder", "file", "files", "project", "workspace", "path", "repo",
+    "repository", "page", "site", "website", "server", "script", "code", "terminal window",
+))
 
 
 def app_to_open_from_intent(intent: str) -> str | None:
@@ -1092,6 +1138,10 @@ def app_to_open_from_intent(intent: str) -> str | None:
     """
 
     text = (intent or "").strip()
+    if intent_is_explanatory(text):
+        # "let me know how can i launch a flask app" asks how, and answering it by
+        # launching something would be answering a different question.
+        return None
     without_url = _URL_IN_INTENT.sub(" ", text)
     trailing = _APP_AFTER_IN.search(without_url)
     if trailing:
@@ -1110,17 +1160,69 @@ def app_to_open_from_intent(intent: str) -> str | None:
 _APP_VERSION_QUERY = re.compile(
     r"(?i)\bversion\s+(?:of|for)\s+(?:the\s+)?(.+?)"
     r"(?=\s+(?:software|application|app|program|tool|client|agent|am|is|are|do|does|on|that)\b|[?.]|$)")
+_APP_NAMED_AS = re.compile(
+    r"(?i)\b(?:with (?:the )?name|named|called)\s+([A-Za-z0-9][A-Za-z0-9 ._+-]{1,39}?)\s*[?.]?\s*$")
 _APP_INSTALLED_QUERY = re.compile(
-    r"(?i)\b(?:is|do i have|have i got)\s+(?:the\s+)?(.+?)\s+(?:installed|present|available)\b")
+    r"(?i)\b(?:is|do i have|have i got)\s+(?:the\s+)?"
+    r"(?!there\b|an?\b|any\b)([A-Za-z0-9][A-Za-z0-9 ._+-]{1,39}?)\s+(?:installed|present|available)\b")
+
+
+_APP_PATH_QUERY = re.compile(
+    r"(?i)\b(?:full |file |install(?:ation)? )?path (?:of|to|for) (?:the )?"
+    r"(?!there\b|an?\b|any\b)([A-Za-z0-9][A-Za-z0-9 ._+-]{1,39}?)"
+    r"(?=\s+(?:app|application|bundle)\b|[?.]|$)")
+_APP_LOCATION_QUERY = re.compile(
+    r"(?i)\bwhere (?:is|are|was)\b\s+(?:the\s+)?(?!there\b|an?\b|any\b)"
+    r"([A-Za-z0-9][A-Za-z0-9 ._+-]{1,39}?)\s+(?:installed|located)\b")
+
+
+def intent_is_application_query(intent: str) -> bool:
+    """Is this a question about an installed application, rather than about a tool?
+
+    "is docker installed" names Docker Desktop, not the container catalog; "what
+    version of git do I have" wants the bundle on disk. Asking whether something
+    is present, where it lives, or which version it is, is always a question about
+    the application, so the domain lock that sends every docker/git/ollama word to
+    that tool has to step aside for these.
+    """
+
+    if not _app_name_from_intent(intent):
+        return False
+    # "named X" alone is not evidence: "the folder named myness" uses the same words.
+    for pattern in (_APP_INSTALLED_QUERY, _APP_VERSION_QUERY, _APP_PATH_QUERY,
+                    _APP_LOCATION_QUERY):
+        if pattern.search(intent or ""):
+            return True
+    return bool(re.search(r"(?i)\bwhen (?:was|were|did)\b[^?]{0,50}\binstall", intent or ""))
+
+
+def _usable_app_name(token: str | None) -> str | None:
+    """Reject the words that look like a name but never name an application.
+
+    Every extraction below can catch a phrase like "system version" or "this
+    folder"; letting one through sends a question about macOS to the first
+    bundle in /Applications, which is worse than not answering at all.
+    """
+
+    if not token:
+        return None
+    token = token.strip().strip("'\"`.,")
+    words = token.casefold().split()
+    if not words or len(token) <= 2:
+        return None
+    if words[-1] in _NOT_AN_APP_TAIL or token.casefold() in _APP_NAME_STOPWORDS:
+        return None
+    return token
 
 
 def _app_name_from_intent(intent: str) -> str | None:
-    for pattern in (_APP_VERSION_QUERY, _APP_INSTALLED_QUERY):
+    for pattern in (_APP_NAMED_AS, _APP_VERSION_QUERY, _APP_INSTALLED_QUERY,
+                    _APP_LOCATION_QUERY, _APP_PATH_QUERY):
         match = pattern.search(intent or "")
         if match:
-            token = match.group(1).strip().strip("'\"`.,")
-            if token and token.casefold() not in _APP_NAME_STOPWORDS and len(token) > 2:
-                return token
+            usable = _usable_app_name(match.group(1))
+            if usable:
+                return usable
     path_match = re.search(r"(/Applications/[^/\s]+(?:\s[^/\s]+)*\.app)", intent)
     if path_match:
         from pathlib import Path as _Path
@@ -1129,25 +1231,21 @@ def _app_name_from_intent(intent: str) -> str | None:
         r"(?i)when was (?:the )?(?:app(?:lication)? )?(?:named |called )?(.+?)(?:\.app)? installed",
         intent,
     )
-    if installed:
-        token = installed.group(1).strip().strip("'\"`")
-        if token and token.casefold() not in _APP_NAME_STOPWORDS:
-            return token
+    if installed and _usable_app_name(installed.group(1)):
+        return _usable_app_name(installed.group(1))
     dated = re.search(
         r"(?i)(?:install(?:ation)? date|created) (?:of|for) (?:the )?(?:app(?:lication)? )?(.+?)(?:\.app)?$",
         intent.strip(),
     )
-    if dated:
-        token = dated.group(1).strip().strip("'\"`")
-        if token and token.casefold() not in _APP_NAME_STOPWORDS:
-            return token
+    if dated and _usable_app_name(dated.group(1)):
+        return _usable_app_name(dated.group(1))
     match = re.search(
         r"(?:contain(?:s|ing)?|named|called)\s+['\"]?([A-Za-z0-9._+-]+)['\"]?",
         intent,
         flags=re.I,
     )
-    if match:
-        return match.group(1)
+    if match and _usable_app_name(match.group(1)):
+        return _usable_app_name(match.group(1))
     match = re.search(
         r"\b(?:app(?:lication)?|version of)\s+['\"]?([A-Za-z0-9._+-]+)['\"]?|"
         r"\b([A-Za-z0-9._+-]+)\s+(?:application\s+)?version\b",
@@ -1156,10 +1254,7 @@ def _app_name_from_intent(intent: str) -> str | None:
     )
     if not match:
         return None
-    token = next((group for group in match.groups() if group), None)
-    if not token or token.casefold() in _APP_NAME_STOPWORDS:
-        return None
-    return token
+    return _usable_app_name(next((group for group in match.groups() if group), None))
 
 
 def docker_target_from_intent(intent: str) -> str | None:
@@ -1681,7 +1776,10 @@ def score_capability(intent: str, capability: Capability) -> int:
         # A forensic question names the thing at risk — git, docker, aws credentials —
         # without being a question about that tool. Its own phrasing decides it.
         return score
-    if domain:
+    if domain and capability.tool == "application" and intent_is_application_query(intent):
+        # "is docker installed" is about the bundle, not the container catalog.
+        score += 30
+    elif domain:
         if capability.tool == domain:
             score += 15
         elif capability.tool in _CODING_TOOLS:
@@ -1770,8 +1868,7 @@ def score_capability(intent: str, capability: Capability) -> int:
                        or ("when was" in text and "installed" in text))
         # A name we could actually pull out is better evidence than the word "app"
         # appearing: "is burp suite installed" names one without using either word.
-        named = bool(_APP_VERSION_QUERY.search(intent or "")
-                     or _APP_INSTALLED_QUERY.search(intent or ""))
+        named = intent_is_application_query(intent)
         if (not any(word in text for word in ("app", "application", "version"))
                 and not install_ask and not named):
             score -= 40
@@ -1805,7 +1902,7 @@ def score_capability(intent: str, capability: Capability) -> int:
         # "is burp suite installed" names an application even though no fixed phrase
         # survives the words between. Only these question shapes count as evidence,
         # so a file search that happens to name something is unaffected.
-        if _APP_VERSION_QUERY.search(intent or "") or _APP_INSTALLED_QUERY.search(intent or ""):
+        if intent_is_application_query(intent):
             score += 55
     if capability.tool == "application" and capability.operation == "open":
         # An openable name plus an opening verb is what an open request looks like;
@@ -1973,11 +2070,31 @@ SHORTLIST_LIMIT_NATIVE = 5
 SHORTLIST_LIMIT_PLANNER = 7
 
 
+# How much evidence a read-only capability needs when nothing else answered.
+# Two independent nouns from the question, not one. A single word is how
+# "list the widget inventory" ended up meaning "list this directory".
+_VIEW_FALLBACK_MIN_SCORE = 24
+
+
 def shortlist_capabilities(intent: str, *, limit: int = SHORTLIST_LIMIT_NATIVE,
-                           min_score: int = SHORTLIST_MIN_SCORE) -> list[tuple[int, Capability]]:
+                           min_score: int = SHORTLIST_MIN_SCORE,
+                           view_fallback: bool = False) -> list[tuple[int, Capability]]:
     ranked = sorted(((score_capability(intent, item), item) for item in CAPABILITIES),
                     key=lambda pair: pair[0], reverse=True)
-    return [(score, item) for score, item in ranked if score >= min_score][:limit]
+    chosen = [(score, item) for score, item in ranked if score >= min_score][:limit]
+    if not view_fallback and (chosen or not intent_is_view_question(intent)):
+        return chosen
+    # Nothing cleared the bar, and the ask only wants to look. The catalog lists
+    # one phrasing per capability; people ask in their own words, and answering
+    # "what files are in this directory" with silence because the catalog says
+    # "list directory" is the discovery problem TACU exists to remove. Reading is
+    # reversible, so the weaker evidence of a matching noun is enough here — and
+    # only here, where the alternative is no answer at all.
+    looking = [(score, item) for score, item in ranked
+               if item.risk == "read" and score >= _VIEW_FALLBACK_MIN_SCORE]
+    # One best guess when nothing at all matched; the wider list only when the
+    # caller has already tried the strong matches and could build nothing.
+    return looking[:limit] if view_fallback else looking[:1]
 
 
 # Words that join two separate instructions. "and" alone does not qualify: "open
@@ -2039,7 +2156,19 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
     Host mutations are included only when include_host_mutate is true (ti do).
     """
 
-    matches = list(shortlist_capabilities(intent))
+    steps = _native_steps_for_intent(intent, include_host_mutate=include_host_mutate)
+    if steps or include_host_mutate or not intent_is_view_question(intent):
+        return steps
+    # The shortlist named something but nothing could be built from it — a find
+    # with no name to find, say. A question that only wants to look should not
+    # end in silence, so try again from the read-only capabilities the question's
+    # own nouns point at.
+    return _native_steps_for_intent(intent, include_host_mutate=False, view_fallback=True)
+
+
+def _native_steps_for_intent(intent: str, *, include_host_mutate: bool = False,
+                             view_fallback: bool = False) -> list[dict[str, Any]]:
+    matches = list(shortlist_capabilities(intent, view_fallback=view_fallback))
     domain = intent_host_domain(intent)
     if include_host_mutate and intent_wants_host_mutate(intent):
         seen_caps = {(item.tool, item.operation) for _score, item in matches}
@@ -2110,7 +2239,9 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
             continue
         # Forensics is deliberately cross-domain: "is something stealing my git
         # credentials" names git but is not a question for the git tool.
-        if domain and capability.tool != domain and capability.tool != "forensics":
+        app_question = capability.tool == "application" and intent_is_application_query(intent)
+        if (domain and capability.tool != domain and capability.tool != "forensics"
+                and not app_question):
             continue
         if capability.operation == "serve":
             continue
@@ -2138,6 +2269,10 @@ def native_steps_for_intent(intent: str, *, include_host_mutate: bool = False) -
         if capability.tool in {"process", "network", "filesystem", "git"}:
             if capability.operation not in {"write", "serve", "delete"}:
                 inputs["limit"] = limit
+        if capability.tool == "filesystem" and capability.operation == "list":
+            # "what is in this folder" answered with the first 10 of 200 is a wrong
+            # answer, not a short one — the same reason the app listing is not capped.
+            inputs["limit"] = limit_from_intent(intent, default=200)
         if capability.tool == "application":
             # "all" means all; a default that truncates turns a listing into a wrong answer.
             wants_all = re.search(r"(?i)\b(?:all|every|complete|full|entire)\b", intent or "")

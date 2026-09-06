@@ -349,6 +349,150 @@ def exact_answer(question: str, evidence: dict[str, Any] | None) -> str | None:
     return exact_filter_answer(question, evidence)
 
 
+# What an application question is actually after. A plan answers all of these with
+# the same tool, so the shape of the reply has to come from the wording.
+_APP_DATE_ASK = re.compile(
+    r"(?i)\b(?:install(?:ation)? date|date of install\w*|creation date|"
+    r"when (?:was|did|were)\b[^?]{0,40}\binstall)")
+_APP_PRESENT_ASK = re.compile(
+    r"(?i)\b(?:is|are|was|were)\b[^?]{0,40}\binstalled\b|\bdo i have\b|"
+    r"\bhave i (?:got|installed)\b|\bis there\b|\bdo we have\b")
+_APP_VERSION_ASK = re.compile(r"(?i)\b(?:version|build number|which release)\b")
+_APP_PATH_ASK = re.compile(
+    r"(?i)\b(?:full path|file path|where is|where's|located|location|installed (?:at|in))\b")
+
+
+def _merge_app_results(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """One question about one application deserves one answer.
+
+    A plan usually asks the same application several ways — find it, read its
+    version, read its dates — and each call returns its own record. Merging them
+    by path keeps the reply a single statement instead of three overlapping ones
+    that appear to contradict each other.
+    """
+
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    suggestions: list[str] = []
+    running: list[Any] = []
+    for entry in entries:
+        for item in entry.get("applications") or []:
+            path = str(item.get("path") or item.get("name") or "")
+            if path not in merged:
+                merged[path] = {}
+                order.append(path)
+            for key, value in item.items():
+                if value not in (None, "") and not merged[path].get(key):
+                    merged[path][key] = value
+        for name in entry.get("did_you_mean") or []:
+            if str(name) not in suggestions:
+                suggestions.append(str(name))
+        for item in entry.get("running") or []:
+            if item not in running:
+                running.append(item)
+    return {"applications": [merged[path] for path in order],
+            "did_you_mean": suggestions, "running": running}
+
+
+def _application_answer(question: str, query_name: str, merged: dict[str, Any]) -> list[str]:
+    """Answer the question that was asked, not every fact the tool returned."""
+
+    apps = merged.get("applications") or []
+    if not apps:
+        return [_no_app_line(query_name, merged)]
+    top = apps[0]
+    label = top.get("display_name") or top.get("name") or query_name
+    wants_date = bool(_APP_DATE_ASK.search(question))
+    wants_version = bool(_APP_VERSION_ASK.search(question))
+    wants_path = bool(_APP_PATH_ASK.search(question))
+    yes_no = bool(_APP_PRESENT_ASK.search(question)) and not wants_date
+
+    created = top.get("fs_creation_date") or top.get("content_created") or top.get("created")
+    added = top.get("date_added")
+    lines: list[str] = []
+    skip: set[str] = set()
+    if wants_date and (created or added):
+        lines.append(f"{label} was installed on this machine on {created or added}.")
+        skip.add("created" if created else "added")
+    elif wants_version and top.get("version"):
+        build = top.get("build")
+        suffix = f" (build {build})" if build and build != top["version"] else ""
+        lines.append(f"{label} version {top['version']}{suffix}.")
+        skip.add("version")
+    elif wants_path and top.get("path"):
+        lines.append(f"{label} is installed at `{top['path']}`.")
+        skip.add("path")
+    elif yes_no:
+        lines.append(f"Yes — {label} is installed.")
+    else:
+        lines.append(f"{label} is installed.")
+
+    if "path" not in skip and top.get("path"):
+        lines.append(f"Path: `{top['path']}`")
+    if "version" not in skip and top.get("version"):
+        lines.append(f"Version: {top['version']}")
+    if top.get("bundle_id"):
+        lines.append(f"Bundle id: `{top['bundle_id']}`")
+    if created and "created" not in skip:
+        lines.append(f"Installed on this machine: {created}")
+    if added and added != created and "added" not in skip:
+        lines.append(f"Added (Spotlight record): {added}")
+    if wants_date and not created and not added:
+        lines.append("No installation date is recorded for this bundle.")
+    if merged.get("running"):
+        lines.append(f"Running: {_process_label(merged['running'][0])}")
+
+    others = apps[1:]
+    if others:
+        lines.append(f"{len(others)} other match(es) for `{query_name}`:")
+        lines.extend(f"- {item.get('display_name') or item.get('name')} ({item.get('path')})"
+                     for item in others[:11])
+    return lines
+
+
+def _readable_duration(seconds: float) -> str:
+    """Uptime the way a person says it: days and hours, not a float of seconds."""
+
+    total = int(max(0, seconds))
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days} day{'s' if days != 1 else ''}")
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes and not days:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    return ", ".join(parts) or "less than a minute"
+
+
+def _storage_headline(volumes: list[str]) -> str:
+    """The number a disk question asks for, taken from the df row for `/`.
+
+    A pasted df table is evidence, not an answer: the user asked how much space
+    is free, so say that first and leave the table underneath.
+    """
+
+    for row in volumes:
+        parts = row.split()
+        if len(parts) >= 9 and parts[-1] == "/" and not parts[0].startswith("map"):
+            size, used, available, capacity = parts[1], parts[2], parts[3], parts[4]
+            return (f"{available} free of {size} on the startup disk "
+                    f"({used} used, {capacity} full).")
+    return ""
+
+
+def _no_app_line(query_name: str, data: dict) -> str:
+    """Say nothing was found, and offer the closest installed names when we have them."""
+
+    line = f"No installed application matching `{query_name}` was found."
+    suggestions = data.get("did_you_mean") or []
+    if suggestions:
+        line += " Did you mean: " + ", ".join(str(item) for item in suggestions) + "?"
+    return line
+
+
 def _process_label(item: dict[str, Any] | None) -> str:
     if not item:
         return "unknown"
@@ -839,38 +983,11 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
     if app_data:
         named = [data for data in app_data if data.get("query")]
         listed = [data for data in app_data if not data.get("query")]
+        by_query: dict[str, list[dict[str, Any]]] = {}
         for data in named:
-            apps = data.get("applications") or []
-            query_name = data.get("query")
-            install_ask = any(phrase in query for phrase in ("installed", "install date", "when was", "creation date"))
-            if install_ask:
-                if not apps:
-                    lines.append(f"No installed application matching `{query_name}` was found.")
-                    continue
-                for item in apps[:5]:
-                    label = item.get("display_name") or item.get("name") or query_name
-                    created = item.get("fs_creation_date") or item.get("content_created")
-                    added = item.get("date_added")
-                    if created or added:
-                        if created:
-                            lines.append(f"{label} filesystem creation date: {created}.")
-                        if added and added != created:
-                            lines.append(f"Spotlight date added: {added}.")
-                        if item.get("path"):
-                            lines.append(f"Path: `{item['path']}`")
-                    else:
-                        lines.append(f"No install/creation date was available for {label}.")
-                continue
-            if apps:
-                lines.append(f"Found {len(apps)} application(s) matching `{query_name}`:")
-                lines.extend(f"- {item.get('display_name') or item.get('name')} ({item.get('path')})"
-                             for item in apps[:12])
-            else:
-                lines.append(f"No installed application matching `{query_name}` was found.")
-            if data.get("version") and query_name:
-                lines.append(f"Version: {data['version']}")
-            if data.get("running"):
-                lines.append(f"Running: {_process_label(data['running'][0])}")
+            by_query.setdefault(str(data.get("query")), []).append(data)
+        for query_name, entries in by_query.items():
+            lines.extend(_application_answer(query, query_name, _merge_app_results(entries)))
         for data in listed:
             apps = data.get("applications") or []
             if apps:
@@ -1066,16 +1183,28 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
                 lines.append(f"TACU workspace: `{workspace}`")
         elif wants_name and hostname:
             pass
+        elif system.get("uptime_seconds") is not None:
+            lines.append(f"This machine has been up for "
+                         f"{_readable_duration(system['uptime_seconds'])}.")
         else:
-            if system.get("mac_ver"):
+            # Only lead with the platform when the platform is what was asked about;
+            # a disk question answered with "macOS-26.6.2-arm64" answers nothing.
+            platform_ask = any(word in query for word in
+                               ("os ", "os version", "operating system", "macos", "platform",
+                                "architecture", "what os", "system version", "hardware",
+                                "machine model", "serial"))
+            if platform_ask and system.get("mac_ver"):
                 lines.append(f"macOS {system['mac_ver']} ({system.get('architecture')})")
-            elif system.get("platform"):
+            elif platform_ask and system.get("platform"):
                 lines.append(str(system["platform"]))
             if system.get("memory_gib"):
                 lines.append(f"Installed memory: {system['memory_gib']} GiB")
             if system.get("cpu_count"):
                 lines.append(f"CPU count: {system['cpu_count']}")
             if system.get("volumes"):
+                headline = _storage_headline([str(row) for row in system["volumes"]])
+                if headline:
+                    lines.append(headline)
                 lines.append("Mounted volumes:")
                 lines.extend(str(row) for row in system["volumes"][:8])
             if system.get("power"):

@@ -70,6 +70,59 @@ def is_safety_refusal(text: str) -> bool:
     return bool(_SAFETY_REFUSAL.search(text or ""))
 
 
+# A local multilingual model sometimes finishes an English sentence in another
+# script — Gemma and Qwen both do it. The user did not ask for it and usually
+# cannot read it, so the harness catches the drift instead of leaving it on
+# screen and expecting the user to work out where it came from.
+_SCRIPT_RANGES: tuple[tuple[str, int, int], ...] = (
+    ("Devanagari", 0x0900, 0x097F),
+    ("Bengali", 0x0980, 0x09FF),
+    ("Gurmukhi", 0x0A00, 0x0A7F),
+    ("Gujarati", 0x0A80, 0x0AFF),
+    ("Tamil", 0x0B80, 0x0BFF),
+    ("Telugu", 0x0C00, 0x0C7F),
+    ("Kannada", 0x0C80, 0x0CFF),
+    ("Malayalam", 0x0D00, 0x0D7F),
+    ("Arabic", 0x0600, 0x06FF),
+    ("Hebrew", 0x0590, 0x05FF),
+    ("Cyrillic", 0x0400, 0x04FF),
+    ("Greek", 0x0370, 0x03FF),
+    ("Thai", 0x0E00, 0x0E7F),
+    ("Hangul", 0xAC00, 0xD7AF),
+    ("Kana", 0x3040, 0x30FF),
+    ("Han", 0x4E00, 0x9FFF),
+)
+# Asking for another language is not drift, so those requests are left alone.
+_ASKS_FOR_A_LANGUAGE = re.compile(
+    r"(?i)\b(?:translate|translation|in|into|to)\s+(?:the\s+)?"
+    r"(hindi|marathi|bengali|punjabi|gujarati|tamil|telugu|kannada|malayalam|urdu|"
+    r"arabic|hebrew|russian|ukrainian|greek|thai|korean|japanese|chinese|mandarin|"
+    r"devanagari|cyrillic)\b")
+
+
+def _scripts_used(text: str) -> set[str]:
+    found: set[str] = set()
+    for char in text or "":
+        code = ord(char)
+        for name, low, high in _SCRIPT_RANGES:
+            if low <= code <= high:
+                found.add(name)
+                break
+    return found
+
+
+def answer_language_drifted(query: str, response: str) -> str | None:
+    """Did the answer switch to a script the question never used?"""
+
+    if _ASKS_FOR_A_LANGUAGE.search(query or ""):
+        return None
+    strayed = _scripts_used(core_answer_body(response)) - _scripts_used(query)
+    if not strayed:
+        return None
+    return ("answered partly in " + ", ".join(sorted(strayed)) +
+            " when the question was written in Latin script")
+
+
 def answer_needs_refine(query: str, response: str,
                         tool_result: dict[str, Any] | None = None) -> str | None:
     """Why the model answer is unusable. None means keep it, including genuine refusals."""
@@ -79,6 +132,9 @@ def answer_needs_refine(query: str, response: str,
         return "empty answer"
     if leaked_reasoning(body):
         return "showed planning instead of the answer"
+    drifted = answer_language_drifted(query, body)
+    if drifted:
+        return drifted
     if is_safety_refusal(body):
         return None
     if len(body) < 8:
