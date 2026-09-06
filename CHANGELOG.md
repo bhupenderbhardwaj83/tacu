@@ -2,6 +2,50 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.4.0] - 2026-09-06
+
+### Added
+
+- `ti code` (aliases `script`, `build`) plans long-horizon coding and scripting work
+  with a larger local model. A 12B planner returns a good four-step plan about half
+  the time; the rest is truncated JSON and timeouts. `ti code` uses
+  `qwen3.8:27b-mlx` with the reply, context and step budgets that model needs, and
+  runs under exactly the same policy gates as `ti auto`.
+- It **refuses** rather than falling back when that model is not installed, and says
+  which command fixes it. Planning a long task with the small model is the failure
+  the verb exists to avoid, so substituting it silently would make the verb a lie.
+  `TACU_CODING_MODEL` points it at a different model; `--keep-models` skips unloading.
+- Other loaded models are unloaded first. Ollama evicts under memory pressure on its
+  own, but a long keep-alive means it holds a model nothing is asking for until the
+  timer expires, and a 27B planner with a large KV cache wants that memory now.
+  Nothing reloads them here: the next ordinary question loads what it needs.
+- `ollama settings` reports every Ollama setting in force — each environment variable
+  and whether it is set, what TACU sends with every request, and **which of the two
+  actually applies**. `OLLAMA_KEEP_ALIVE=60m` is overridden by the `keep_alive` TACU
+  sends per request, so the environment value never reaches the server; the answer
+  now says so instead of reporting a number that does not apply. `ollama version` too.
+- Git grew from 10 operations to 32: `pull`, `fetch`, `clone`, `checkout`, `merge`,
+  `reset`, `revert`, `restore`, `stash`, `stash_pop` and `tag`, alongside `show`,
+  `blame`, `config`, `tags`, `stashes`, `describe`, `shortlog`, `reflog`, `files`,
+  `diff_staged` and `ahead_behind`. Daily Git was simply absent.
+- Docker grew from 13 to 27: `info`, `version`, `disk_usage`, `top`, `port`,
+  `history`, `events` and `compose_ps` for reading; `restart`, `kill`, `pause`,
+  `unpause`, `prune` and `exec` for changing, all reviewed.
+
+### Fixed
+
+- A capability was penalised 80 points for not containing its tool's name, which
+  cancelled its own phrase match. "who wrote this file", "stash my changes" and
+  "what is my keepalive" all scored below the bar and reached no tool, which is what
+  sent people back to the native commands these tools exist to replace. A phrase
+  match is now evidence in itself, for Git, Docker and Ollama alike.
+- "restart the container" was answered by `docker.start`, because the operation name
+  was matched as a substring and "restart" contains "start".
+- Every host mutation was given a score floor, so they all tied and "checkout the
+  main branch" could be answered by `process.kill`. They are scored on their merits.
+- The reviewed-mutation gate did not recognise Git or Docker state changes, so `ti do`
+  could not reach pull, stash, checkout, merge, restart, prune or exec at all.
+
 ## [0.3.13] - 2026-09-06
 
 ### Fixed

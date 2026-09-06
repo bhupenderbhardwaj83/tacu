@@ -864,6 +864,45 @@ def print_migrate_help() -> None:
     _more("backup", "doctor", "version")
 
 
+def print_code_help() -> None:
+    print(_heading("ti code — long-horizon coding and scripting"))
+    print(paint("WHAT: The same harness, planned by a model big enough to hold a multi-step build.",
+                PALETTE.text))
+    print(paint("WHEN: Work that spans several files and commands — scaffold, install, wire, run.",
+                PALETTE.text))
+    print(paint("WHY:  A 12B planner returns a good four-step plan about half the time; the rest "
+                "is truncated JSON and timeouts.", PALETTE.text))
+    _legend()
+    print()
+    print(paint("USAGE", PALETTE.violet + PALETTE.bold))
+    _entry("code", "ti code INTENT", "ti code add a health endpoint and a test for it",
+           "Plans with qwen3.8:27b-mlx, raised reply and step budgets, and runs under the same "
+           "policy gates as ti auto. script and build are aliases.")
+    _entry("--dry-run", "ti code --dry-run INTENT", "ti code --dry-run add a login page",
+           "Show the plan and execute nothing.")
+    _entry("--keep-models", "ti code --keep-models INTENT", "ti code --keep-models fix the tests",
+           "Leave other models loaded. By default they are unloaded first.")
+    _entry("--max-steps", "ti code --max-steps N INTENT", "ti code --max-steps 6 refactor the parser",
+           "Raise or lower the step budget (1-10; the default profile uses 8).")
+    print()
+    print(paint("MEMORY", PALETTE.violet + PALETTE.bold))
+    print(paint("  A 27B model with a large KV cache does not share memory comfortably with a "
+                "12B model nothing is asking for, and a long keep-alive means the small one "
+                "will not step aside by itself.", PALETTE.muted))
+    print(paint("  So ti code unloads the others first. Nothing reloads them here: the next "
+                "ordinary ti ask loads what it needs, which is when it is wanted.", PALETTE.muted))
+    print()
+    print(paint("IF THE MODEL IS MISSING", PALETTE.violet + PALETTE.bold))
+    print(paint("  ti code refuses rather than falling back. Planning a long task with the small "
+                "model is the failure this verb exists to avoid.", PALETTE.muted))
+    print(paint("  ollama pull qwen3.8:27b-mlx   ·   or TACU_CODING_MODEL=your-model ti code …",
+                PALETTE.muted))
+    print()
+    print(paint("TRY NEXT: ti code --dry-run add a health endpoint   ·   ti auto for host work",
+                PALETTE.muted))
+    _more("auto", "do", "model")
+
+
 def print_inspect_help() -> None:
     print(_heading("ti inspect — colorize, no model"))
     print(paint("WHAT: Readable colorized stdout for a command you already know.", PALETTE.text))
@@ -1151,6 +1190,9 @@ _DENSE_HELP = {
     "web": print_web_help,
     "inspect": print_inspect_help,
     "backup": print_backup_help,
+    "code": print_code_help,
+    "script": print_code_help,
+    "build": print_code_help,
     "migrate": print_migrate_help,
     "restore": print_backup_help,
     "data": print_data_help,
@@ -1215,7 +1257,7 @@ _CHOICE_ROWS = (
 # this catalog with argparse, so adding a command without documenting it fails.
 # User-facing aliases are listed beside their canonical command in the overview.
 OVERVIEW_COMMANDS = (
-    "ask", "web", "do", "auto", "run", "docker", "inspect", "history",
+    "ask", "web", "do", "auto", "code", "run", "docker", "inspect", "history",
     "evidence", "copy", "clip", "syntax", "save", "extract", "juicy",
     "data", "backup", "migrate", "all", "completion", "shell-init", "version",
     "models", "model", "config", "plugins", "doctor", "setup",
@@ -1356,6 +1398,11 @@ def print_quick_help() -> None:
            "Exports an entire retained answer. Omit TURN for the latest response.")
     _entry("clear", "ti clear --yes", "ti clear --yes",
            "Deletes the private retained-turn history only after the explicit --yes confirmation.")
+    _entry("code", "ti code INTENT   ·   script / build are aliases",
+           "ti code add a health endpoint and a test for it",
+           "Long-horizon coding and scripting, planned by a larger local model "
+           "(qwen3.8:27b-mlx). Unloads other models first so the bigger planner has the "
+           "memory, and refuses rather than quietly planning with the small one.")
     _entry("backup", "ti backup create|list|restore …", "ti backup create ~/Dropbox",
            "Packs every database and setting into one portable .tar.gz, and restores it after a crash.")
     _entry("migrate", "ti migrate [DESCRIPTION] [--exclude PATTERN] [--dry-run]",

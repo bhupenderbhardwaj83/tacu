@@ -32,6 +32,7 @@ from .platform import detect
 from .recipes import (
     RECIPE_LIMIT, Recipe, RecipeStore, index_intent_results, preview_argv, seed_platform_recipes,
 )
+from .coding import MAX_CODING_STEPS
 from .automation import (
     MAX_AUTONOMOUS_STEPS, CommandStep, command_from_text, create_plan, evaluate_policy,
     native_instead_of_shell, _step_from_capability,
@@ -3166,6 +3167,44 @@ def _step_fingerprint(step: Any) -> str:
     return "shell:" + " ".join([str(executable), *args]).strip()
 
 
+def _coding_client(arguments: argparse.Namespace) -> ModelProvider:
+    """Point this run at the coding planner, and give it the memory to work in.
+
+    Refuses rather than falling back: a long-horizon task planned by the small
+    model is the failure `ti code` exists to avoid, and silently substituting it
+    would make the verb a lie.
+    """
+
+    from . import coding
+
+    model = coding.coding_model()
+    if not coding.model_is_installed(model):
+        raise TacuError(coding.missing_model_message(model))
+
+    if not getattr(arguments, "keep_models", False):
+        released = coding.release_other_models(model)
+        if released:
+            print(paint(f"  models · unloaded {', '.join(released)} to leave room for {model}",
+                        PALETTE.muted))
+
+    profile = coding.PROFILE
+    # A reasoning model spends its first tokens thinking, so the budgets that
+    # suit the small planner truncate this one into malformed JSON.
+    os.environ.setdefault("TACU_NUM_PREDICT", str(profile.num_predict))
+    os.environ.setdefault("TACU_NUM_CTX", str(profile.num_ctx))
+    if getattr(arguments, "max_steps", None) in (None, 0):
+        arguments.max_steps = profile.max_steps
+    if getattr(arguments, "timeout", 0) and arguments.timeout < profile.timeout:
+        arguments.timeout = profile.timeout
+    # ti code plans and runs like ti auto, gated by the same policy.
+    arguments.coding_profile = True
+    arguments.subcommand = "auto"
+    print(paint(f"CODE  planning with {model} · {arguments.max_steps} step budget",
+                PALETTE.accent + PALETTE.bold))
+    return load_provider(arguments.provider, base_url=arguments.url, model=model,
+                         timeout=arguments.timeout)
+
+
 def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) -> int:
     autonomous = arguments.subcommand == "auto"
     intent = _intent_text(arguments.intent)
@@ -3174,8 +3213,13 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
         workspace = confirm_write_location(
             workspace, dry_run=arguments.dry_run, explicit=arguments.workspace is not None,
         )
-    if not 1 <= arguments.max_steps <= MAX_AUTONOMOUS_STEPS:
-        raise TacuError(f"--max-steps must be between 1 and {MAX_AUTONOMOUS_STEPS}.")
+    # Building something takes more steps than answering a question about the
+    # host, so the coding profile raises its own ceiling rather than working
+    # around the one meant for single-fact requests.
+    step_ceiling = MAX_CODING_STEPS if getattr(arguments, "coding_profile", False) \
+        else MAX_AUTONOMOUS_STEPS
+    if not 1 <= arguments.max_steps <= step_ceiling:
+        raise TacuError(f"--max-steps must be between 1 and {step_ceiling}.")
     if is_language_fast_path(intent):
         with HistoryStore(app_home() / "history.db") as store:
             ask(store=store, client=client, query=intent, tool_result=None,
@@ -3506,6 +3550,21 @@ def parser() -> argparse.ArgumentParser:
                              help="maximum autonomous commands (1-5)")
     auto_parser.add_argument("--dry-run", action="store_true", help="show policy decisions and execute nothing")
     auto_parser.add_argument("intent", nargs=argparse.REMAINDER)
+    code_parser = command_parser(
+        "code",
+        "long-horizon coding and scripting, planned by a larger local model",
+        "ti code add a health endpoint and a test for it",
+        aliases=["script", "build"],
+    )
+    code_parser.add_argument("--workspace", type=Path,
+                             help="workspace boundary; defaults to selected workspace")
+    code_parser.add_argument("--max-steps", type=int, default=None,
+                             help="maximum commands (defaults to the coding profile)")
+    code_parser.add_argument("--dry-run", action="store_true",
+                             help="show the plan and execute nothing")
+    code_parser.add_argument("--keep-models", action="store_true",
+                             help="leave other loaded models in memory instead of unloading them")
+    code_parser.add_argument("intent", nargs=argparse.REMAINDER)
     run_parser = command_parser("run", "run a local command and return the exact information requested",
                                 "ti run -q what is the primary interface IP? -- ifconfig",
                                 aliases=["companion", "focus"])
@@ -4647,6 +4706,9 @@ def _main(argv: list[str] | None = None) -> int:
             return handle_config_command(arguments, client)
         if arguments.subcommand == "web":
             return handle_web_command(arguments, client)
+        if arguments.subcommand in {"code", "script", "build"}:
+            client = _coding_client(arguments)
+            return handle_intent_command(arguments, client)
         if arguments.subcommand in {"do", "propose", "plan", "auto"}:
             return handle_intent_command(arguments, client)
         with HistoryStore(app_home() / "history.db") as store:
