@@ -2,6 +2,24 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.4.3] - 2026-09-07
+
+### Fixed
+
+- Counting and naming the contents of piped output no longer calls the model at all.
+  `ls -la | ti ask how many files … show their names` took **349 seconds** and
+  returned nothing; it now answers in **0.19 seconds**, exactly and in full. Asking a
+  12B model to retype 55 filenames it was already given is work the harness can do
+  itself, and cannot get wrong.
+- Only questions that want everything are answered this way. Anything selective —
+  "which database ports are open", "files larger than 1MB", "show only the pdfs" —
+  still goes to the model, because selecting needs judgement.
+- The reply-budget ladder drops its middle rung: 1024 then the ceiling, not 1024,
+  2048 and the ceiling. A reply cut off at the limit needs the widest budget, and a
+  model looping on its own reasoning loops at every budget, so the middle attempt
+  only ever cost another minute before failing the same way. Worst case falls from
+  342 seconds to 283.
+
 ## [0.4.2] - 2026-09-07
 
 ### Fixed

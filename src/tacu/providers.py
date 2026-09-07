@@ -81,11 +81,11 @@ class OllamaProvider:
         working answer never depends on the user setting an environment variable.
         """
 
-        # At most three attempts, so a wrong starting budget can never turn one
-        # question into a long chain of full generations.
-        ladder = [self.num_predict,
-                  min(_MAX_NUM_PREDICT, max(self.num_predict * 2, _RETRY_NUM_PREDICT)),
-                  _MAX_NUM_PREDICT]
+        # Two attempts, not three. A middle rung helps nothing: a reply cut off at
+        # the limit needs the widest budget, and a model looping on its own
+        # reasoning will loop at every budget. The third rung only ever cost
+        # another minute of the user's time before failing the same way.
+        ladder = [self.num_predict, _MAX_NUM_PREDICT]
         budgets: list[int] = []
         for budget in ladder:
             if budget > (budgets[-1] if budgets else 0):

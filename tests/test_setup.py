@@ -958,7 +958,7 @@ class ThinkingBudgetTests(unittest.TestCase):
         client = self._client(budget="1024")
         # Tied to the constant, so raising the cap for long listings does not
         # need this test edited to agree with it.
-        self.assertEqual(client.reply_budgets(), [1024, 2048, _MAX_NUM_PREDICT])
+        self.assertEqual(client.reply_budgets(), [1024, _MAX_NUM_PREDICT])
         self.assertEqual(client.reply_budgets()[-1], _MAX_NUM_PREDICT,
                          "escalation must stop at the cap")
 
@@ -973,7 +973,7 @@ class ThinkingBudgetTests(unittest.TestCase):
                  for call in opened.call_args_list]
         from tacu.providers import _MAX_NUM_PREDICT
 
-        self.assertEqual(tried, [1024, 2048, _MAX_NUM_PREDICT])
+        self.assertEqual(tried, [1024, _MAX_NUM_PREDICT])
         self.assertNotIn("Looking at the available tools", text)
         self.assertNotIn("github_actions", text)
         # The harness owns the budget: never hand the user an env var to set.

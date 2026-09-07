@@ -281,10 +281,91 @@ def extract_facts(text: str, command: str = "", structured: Any = None) -> dict[
     return None
 
 
+# Counting and naming what is already on the page is arithmetic, not reasoning.
+# Asking a 12B model to retype 55 filenames took 342 seconds across three budgets
+# and produced nothing; reading them takes no time and cannot be wrong.
+_COUNT_ASK = re.compile(r"(?i)\bhow many\b|\bcount\b|\bnumber of\b")
+_NAME_ASK = re.compile(
+    r"(?i)\b(?:show|list|give|name|display|print|tell)\b[^?]{0,40}"
+    r"\b(?:name|names|them|all|each|every|these|those|entries|files|lines)\b"
+    r"|\btheir names\b|\bwhat are they\b")
+# Any of these means the question is selective, and selecting needs the model.
+_RESTRICTIVE = re.compile(
+    r"(?i)\b(?:which|whose|only|except|excluding|containing|contains|matching|match|"
+    r"with|without|where|that are|larger|bigger|smaller|older|newer|before|after|"
+    r"greater|less|between|open|closed|failed|error|errors|database|from|starting|"
+    r"ending|type|kind|sort|group|top|first|last|biggest|largest)\b")
+# `ls -l` and friends: permissions, links, owner, group, size, date, then the name.
+_LS_ROW = re.compile(r"^([-dlbcps])([rwxsStTX@+.-]{9})[@+.]*\s+\d+\s+\S+\s+\S+\s+\d+\s+"
+                     r"(?:\S+\s+\S+\s+\S+)\s+(.+)$")
+
+
+def _listing_entries(text: str) -> list[tuple[bool, str]] | None:
+    """Names from an `ls -l` style listing, as (is_directory, name). None if not one."""
+
+    rows: list[tuple[bool, str]] = []
+    considered = 0
+    for line in (text or "").splitlines():
+        stripped = line.rstrip()
+        if not stripped or stripped.startswith("total "):
+            continue
+        considered += 1
+        match = _LS_ROW.match(stripped)
+        if not match:
+            continue
+        name = match.group(3).strip()
+        if name in {".", ".."}:
+            continue
+        # A symlink shows as "link -> target"; the name is the left side.
+        name = name.split(" -> ", 1)[0]
+        rows.append((match.group(1) == "d", name))
+    if not rows or considered == 0 or len(rows) < considered * 0.6:
+        return None
+    return rows
+
+
+def enumeration_answer(question: str, text: str) -> str | None:
+    """Count and name what the piped text contains, without asking a model.
+
+    Only for a question that wants everything. Anything selective — "which ports
+    are open", "the files larger than 1MB" — needs judgement and is left alone.
+    """
+
+    query = (question or "").strip()
+    if not query or not text:
+        return None
+    wants_count = bool(_COUNT_ASK.search(query))
+    wants_names = bool(_NAME_ASK.search(query))
+    if not (wants_count or wants_names) or _RESTRICTIVE.search(query):
+        return None
+
+    entries = _listing_entries(text)
+    if entries is None:
+        return None
+    folded = query.casefold()
+    directories = [name for is_dir, name in entries if is_dir]
+    files = [name for is_dir, name in entries if not is_dir]
+    # "how many files" means files; "entries" or "items" means everything listed.
+    everything = any(word in folded for word in ("entries", "items", "lines", "everything"))
+    chosen = [name for _is_dir, name in entries] if everything else files
+    label = "entries" if everything else "files"
+
+    lines = [f"There are {len(chosen)} {label} in the command output"
+             + (f" ({len(directories)} directories are listed separately)."
+                if directories and not everything else ".")]
+    if wants_names:
+        lines.append("")
+        lines.extend(f"{index}. {name}" for index, name in enumerate(sorted(chosen), 1))
+    return "\n".join(lines)
+
+
 def exact_answer(question: str, evidence: dict[str, Any] | None) -> str | None:
     """Return a concise answer only when intent and deterministic facts both match."""
 
     if not evidence: return None
+    counted = enumeration_answer(question, _block_text(evidence.get("result", {}).get("stdout", {})))
+    if counted:
+        return counted
     facts = evidence.get("facts")
     if not facts:
         block = evidence.get("result", {}).get("stdout", {})
