@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from .platform import ollama_argv, run_argv, which
 
@@ -127,3 +128,34 @@ def missing_model_message(model: str) -> str:
         f"TACU_CODING_MODEL=your-model ti code …\n"
         f"  Or use the default planner instead:  ti auto …"
     )
+
+
+# The only tools the coding lane offers. TACU has more than thirty; showing a
+# local model the forensics and packet-capture surface alongside them spends
+# context on schemas it will never use and invites calls that make no sense here.
+CODING_TOOL_SURFACE: tuple[str, ...] = (
+    "read_file", "edit_file", "write_file", "search_code", "repo_map",
+    "inspect_symbol", "diagnostics", "run_tests", "shell",
+)
+
+
+def coding_tool_schemas() -> list[dict[str, Any]]:
+    """The coding tools in the shape Ollama's native tool calling expects."""
+
+    from .tools import specs
+
+    wanted = {spec.name: spec for spec in specs() if spec.name in CODING_TOOL_SURFACE}
+    schemas: list[dict[str, Any]] = []
+    for name in CODING_TOOL_SURFACE:
+        spec = wanted.get(name)
+        if spec is None:
+            continue
+        schemas.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": " ".join((spec.description or "").split())[:400],
+                "parameters": spec.input_schema,
+            },
+        })
+    return schemas

@@ -122,6 +122,56 @@ class OllamaProvider:
                "answering. A lighter model handles this better: "
                "ti config update --model qwen2.5-coder:7b")
 
+    def chat_tools(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+                   *, num_predict: int | None = None,
+                   temperature: float = 0.1) -> dict[str, Any]:
+        """One turn with native tool calling: returns the content and the calls.
+
+        The model decides the next single action rather than writing a whole plan
+        up front, which is the difference between adapting to what a file actually
+        contains and guessing at it beforehand.
+        """
+
+        payload = json.dumps({
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "stream": False,
+            "keep_alive": self.keep_alive,
+            "options": {"num_ctx": self.num_ctx,
+                        "num_predict": self.num_predict if num_predict is None else num_predict,
+                        "temperature": temperature,
+                        "repeat_penalty": self.repeat_penalty},
+        }, ensure_ascii=False).encode()
+        request = urllib.request.Request(f"{self.base_url}/api/chat", data=payload,
+                                         headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                event = json.load(response)
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise TacuError(f"{self.model} refused the request: {detail[:300]}") from error
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise TacuError(f"Ollama did not answer within {self.timeout}s: {error}") from error
+        message = event.get("message") or {}
+        content, thinking = _assistant_parts(message)
+        calls: list[dict[str, Any]] = []
+        for raw in message.get("tool_calls") or []:
+            function = raw.get("function") or {}
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {}
+            calls.append({"name": name,
+                          "arguments": arguments if isinstance(arguments, dict) else {}})
+        return {"content": (content or "").strip(), "thinking": (thinking or "").strip(),
+                "tool_calls": calls, "done_reason": event.get("done_reason", "")}
+
     def _chat_once(self, model: str, messages: list[dict[str, str]], *, stream: bool,
                    outcome: dict[str, Any] | None = None,
                    num_predict: int | None = None,

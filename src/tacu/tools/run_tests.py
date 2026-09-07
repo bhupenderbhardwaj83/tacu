@@ -29,14 +29,28 @@ def execute(context: ToolContext, *, target: str = ".", framework: str = "auto",
     selected = context.guarded_path(target)
     root = context.workspace.resolve()
     if framework == "auto":
-        if (root / "tests").exists() and shutil.which("pytest"): framework = "pytest"
-        elif (root / "tests").exists(): framework = "unittest"
+        # Tests are not always in a tests/ directory. A project with test_x.py
+        # beside the code had no detectable framework at all, so a coding run
+        # could never prove itself.
+        has_dir = (root / "tests").exists()
+        beside_code = any(root.glob("test_*.py")) or any(root.glob("*_test.py"))
+        if (has_dir or beside_code) and shutil.which("pytest"): framework = "pytest"
+        # unittest ships with Python, so it is always available to fall back on.
+        elif has_dir or beside_code: framework = "unittest"
         elif (root / "Cargo.toml").exists(): framework = "cargo"
         elif (root / "package.json").exists(): framework = "npm"
         elif (root / "go.mod").exists(): framework = "go"
         else: raise ToolFailure("Could not detect a supported test framework.", code="framework_not_found")
     if framework == "pytest": command = [shutil.which("pytest") or "pytest", "-q", str(selected)] + (["-x"] if fail_fast else [])
-    elif framework == "unittest": command = [sys.executable, "-m", "unittest", "discover", "-s", str(selected if selected != root else root / "tests"), "-v"]
+    elif framework == "unittest":
+        start = selected if selected != root else (root / "tests" if (root / "tests").is_dir() else root)
+        command = [sys.executable, "-m", "unittest", "discover", "-s", str(start),
+                   "-p", "test*.py", "-v"]
+        if start == root:
+            # Tests beside the code import the modules they test, so the workspace
+            # has to be importable. A tests/ package resolves itself and passing
+            # -t there breaks discovery when it has no __init__.py.
+            command[-1:-1] = ["-t", str(root)]
     elif framework == "cargo": command = ["cargo", "test"] + (["--", "--fail-fast"] if fail_fast else [])
     elif framework == "npm": command = ["npm", "test", "--", "--runInBand"]
     elif framework == "go": command = ["go", "test", "./..."] + (["-failfast"] if fail_fast else [])
@@ -55,7 +69,21 @@ def execute(context: ToolContext, *, target: str = ".", framework: str = "auto",
             except ValueError: pass
             break
     failures = [line.strip() for line in output.splitlines() if re.search(r"\b(?:FAIL|ERROR|failed)\b", line, re.I)][:50]
-    return {"framework": framework, "command": command, "passed": completed.returncode == 0, "exit_code": completed.returncode,
+    advice = ""
+    if framework == "unittest" and "NO TESTS RAN" in output.upper():
+        # unittest discovers TestCase classes. A file of bare `def test_x()`
+        # functions is pytest's shape, so say that rather than reporting a
+        # mysterious empty run the caller cannot act on.
+        pytest_style = any("def test_" in path.read_text(encoding="utf-8", errors="replace")
+                           for path in list(root.glob("test*.py"))[:20]
+                           if path.is_file())
+        advice = ("unittest found no TestCase classes. These tests are written as plain "
+                  "functions, which is pytest's style; install pytest to run them, or "
+                  "use diagnostics to check the code instead."
+                  if pytest_style else
+                  "No tests were discovered. Check the file names match test*.py.")
+    return {"framework": framework, "command": command, "passed": completed.returncode == 0,
+            "advice": advice, "exit_code": completed.returncode,
             "total": total, "failures": failures, "output": bounded,
             "duration_ms": round((time.monotonic()-started)*1000), "_truncated": truncated or len(failures) == 50}
 

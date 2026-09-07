@@ -2,6 +2,51 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.4.4] - 2026-09-07
+
+### Changed
+
+- `ti code` no longer plans in one shot. It runs a step at a time: the model calls
+  one tool, sees the real result, and decides the next action. Batch planning asked
+  it to name the arguments of step four before step one had run — it cannot know
+  the indentation of a file it has not read, so the edit missed and every later
+  step compounded the miss.
+- The lane uses Ollama's native tool calling rather than parsing a JSON plan out of
+  the reply. Measured on this machine: a tool call comes back in 12–15 seconds
+  against 130–230 seconds to generate a plan, and both installed models produce
+  well-formed calls.
+- Nine tools are offered instead of all thirty-odd. Forensics, packet capture and
+  host telemetry are not part of writing code, and their schemas were spending
+  context and inviting calls that made no sense in this lane.
+
+### Added
+
+- A standing task list the model writes and rewrites with `todo_write`, rendered
+  into every turn so a long job keeps its shape after the original request has
+  slid out of the window. Rewriting it does not spend the action budget: four list
+  updates once used half of an eight-step allowance before any work was proved.
+- A guard that refuses to let the job be called finished while the code is
+  unproven. Change a file and nothing has run since, and the completion is sent
+  back with what to do about it. A clean run goes stale the moment another file
+  changes.
+- The shell may no longer write to source files — `echo … > app.py`, `sed -i`,
+  `rm` and `tee` on a source path are refused with the reason. Those bypass the
+  edit tools, so nothing records the change and nothing can undo it. Tests,
+  linters and builds are untouched.
+- A file must be read before it is edited. An edit whose target text was guessed
+  either fails or replaces the wrong thing.
+- A copy of the source is taken before the first change, and `Ctrl+C` restores it.
+  It is taken lazily, so a job that only reads never pays for one, and it skips
+  the directories every project rebuilds.
+
+### Fixed
+
+- `run_tests` could not find tests that sit beside the code rather than in a
+  `tests/` directory, so a project like that had no way to prove itself at all. It
+  now finds `test_*.py` either way and falls back to stdlib unittest when pytest is
+  absent. When unittest discovers nothing because the tests are written as plain
+  functions, it says so and names the fix instead of reporting an empty run.
+
 ## [0.4.3] - 2026-09-07
 
 ### Fixed

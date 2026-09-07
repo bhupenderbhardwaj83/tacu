@@ -3199,11 +3199,10 @@ def _coding_client(arguments: argparse.Namespace) -> ModelProvider:
     os.environ.setdefault("TACU_NUM_CTX", str(profile.num_ctx))
     if getattr(arguments, "max_steps", None) in (None, 0):
         arguments.max_steps = profile.max_steps
+    arguments.max_steps = max(1, min(int(arguments.max_steps), coding.MAX_CODING_STEPS))
     if getattr(arguments, "timeout", 0) and arguments.timeout < profile.timeout:
         arguments.timeout = profile.timeout
-    # ti code plans and runs like ti auto, gated by the same policy.
     arguments.coding_profile = True
-    arguments.subcommand = "auto"
     print(paint(f"CODE  planning with {model} · {arguments.max_steps} step budget",
                 PALETTE.accent + PALETTE.bold))
     return load_provider(arguments.provider, base_url=arguments.url, model=model,
@@ -3239,6 +3238,78 @@ def _pipe_is_the_subject(intent: str) -> bool:
 
     return not (intent_mutates_workspace(intent) or extract_file_write(intent)
                 or intent_wants_host_mutate(intent))
+
+
+def handle_coding_command(arguments: argparse.Namespace, client: ModelProvider) -> int:
+    """Run one coding job as a step-at-a-time loop rather than a batch plan."""
+
+    from . import coding as coding_module
+    from .codingloop import CodingLoop
+
+    intent = _intent_text(arguments.intent)
+    if not intent:
+        raise TacuError("ti code needs a goal. Example: ti code add a health endpoint and a test")
+    workspace = _intent_workspace(arguments.workspace)
+
+    def dispatch(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        context = ToolContext(workspace, app_home(), approve_dangerous=True)
+        result = invoke_tool(name, payload, context)
+        data = dict(result.data or {})
+        data.setdefault("status", "success" if result.ok else "error")
+        if not result.ok and result.error:
+            data["error"] = result.error
+        return data
+
+    def announce(kind: str, message: str) -> None:
+        if kind == "call":
+            print(paint(f"  → {message}", PALETTE.muted))
+        elif kind == "refused":
+            print(paint(f"  ✗ {message}", PALETTE.yellow))
+        elif kind == "done":
+            print(paint(f"  ✓ {message}", PALETTE.green))
+
+    loop = CodingLoop(workspace=workspace, goal=intent, client=client,
+                      tools=coding_module.coding_tool_schemas(), dispatch=dispatch,
+                      max_steps=arguments.max_steps, on_event=announce)
+    print(paint(f"CODE  {intent}", PALETTE.accent + PALETTE.bold))
+    print(paint(f"  workspace: {workspace}", PALETTE.muted))
+
+    try:
+        outcome = loop.run()
+    except KeyboardInterrupt:
+        restored = loop.snapshot.restore()
+        loop.snapshot.discard()
+        print(paint(f"\nStopped. Restored {len(restored)} file(s) to their state before this run.",
+                    PALETTE.yellow))
+        return 130
+
+    if outcome.changed:
+        print(paint("  changed: " + ", ".join(outcome.changed[:8]), PALETTE.muted))
+    if outcome.completed:
+        print(render_answer(outcome.answer or "Done.", query=intent))
+        loop.snapshot.discard()
+        return 0
+
+    # Say what stopped it and leave the work in place: a half-finished job the
+    # user can look at beats a rollback they did not ask for.
+    reason = {"step budget": f"Stopped after {outcome.steps} steps without a verified finish.",
+              "model error": f"The model stopped: {outcome.answer}"}.get(
+                  outcome.stopped, "Stopped without a verified finish.")
+    print(paint(reason, PALETTE.yellow + PALETTE.bold))
+    if outcome.changed:
+        print(paint("  Undo with: ti code --undo", PALETTE.muted))
+        _remember_restore(loop.snapshot)
+    return 1
+
+
+_LAST_RESTORE: list[Any] = []
+
+
+def _remember_restore(snapshot: Any) -> None:
+    """Keep the restore point for the session so --undo has something to undo."""
+
+    _LAST_RESTORE.clear()
+    _LAST_RESTORE.append(snapshot)
 
 
 def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) -> int:
@@ -4753,7 +4824,7 @@ def _main(argv: list[str] | None = None) -> int:
             return handle_web_command(arguments, client)
         if arguments.subcommand in {"code", "script", "build"}:
             client = _coding_client(arguments)
-            return handle_intent_command(arguments, client)
+            return handle_coding_command(arguments, client)
         if arguments.subcommand in {"do", "propose", "plan", "auto"}:
             return handle_intent_command(arguments, client)
         with HistoryStore(app_home() / "history.db") as store:
