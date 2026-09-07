@@ -55,6 +55,52 @@ class CountingTests(unittest.TestCase):
         answer = enumeration_answer("how many entries are in the output", LISTING)
         self.assertIn("There are 5 entries", answer)
 
+    def test_the_headline_names_what_was_counted(self) -> None:
+        files = enumeration_answer("how many files are there", LISTING)
+        dirs = enumeration_answer("how many directories are there", LISTING)
+        self.assertTrue(files.startswith("There are 4 files"), files)
+        self.assertTrue(dirs.startswith("There are 1 directories"), dirs)
+
+
+class TargetTests(unittest.TestCase):
+    """What is being counted must be read from the question, not assumed.
+
+    "How many folders not files are there and name them all" was answered with
+    the file list and the file count — instant, confident, and wrong.
+    """
+
+    def test_folders_not_files_counts_folders(self) -> None:
+        answer = enumeration_answer(
+            "how many folders not files are there and name them all", LISTING)
+        self.assertIsNotNone(answer)
+        self.assertIn("1 directories", answer)
+        self.assertIn("nested", answer)
+        self.assertNotIn("alpha.txt", answer)
+
+    def test_files_not_folders_counts_files(self) -> None:
+        answer = enumeration_answer("how many files not folders are there", LISTING)
+        self.assertIn("4 files", answer)
+
+    def test_directories_asked_plainly(self) -> None:
+        for question in ("how many directories are there",
+                         "list the folders",
+                         "name all the directories",
+                         "count the subdirectories"):
+            with self.subTest(question=question):
+                answer = enumeration_answer(question, LISTING)
+                self.assertIsNotNone(answer, question)
+                self.assertIn("directories", answer)
+                self.assertNotIn("4 files in", answer)
+
+    def test_an_ambiguous_subject_goes_to_the_model(self) -> None:
+        # "files and folders" names both without excluding either; guessing which
+        # one is meant is exactly the mistake this refuses to repeat.
+        self.assertIsNone(enumeration_answer("how many files and folders are there", LISTING))
+
+    def test_a_question_naming_no_subject_goes_to_the_model(self) -> None:
+        self.assertIsNone(enumeration_answer("how many are there", LISTING))
+        self.assertIsNone(enumeration_answer("count them", LISTING))
+
 
 class RestraintTests(unittest.TestCase):
     """A selective question needs judgement and must reach the model."""

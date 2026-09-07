@@ -287,7 +287,8 @@ def extract_facts(text: str, command: str = "", structured: Any = None) -> dict[
 _COUNT_ASK = re.compile(r"(?i)\bhow many\b|\bcount\b|\bnumber of\b")
 _NAME_ASK = re.compile(
     r"(?i)\b(?:show|list|give|name|display|print|tell)\b[^?]{0,40}"
-    r"\b(?:name|names|them|all|each|every|these|those|entries|files|lines)\b"
+    r"\b(?:name|names|them|all|each|every|these|those|entries|files|lines|"
+    r"folders?|directories|directory|dirs?|items)\b"
     r"|\btheir names\b|\bwhat are they\b")
 # Any of these means the question is selective, and selecting needs the model.
 _RESTRICTIVE = re.compile(
@@ -324,11 +325,53 @@ def _listing_entries(text: str) -> list[tuple[bool, str]] | None:
     return rows
 
 
+# What the question is counting. Getting this wrong is worse than being slow:
+# "how many folders not files" answered with the file list is a confident lie.
+_ASKS_FILES = re.compile(r"(?i)\bfiles?\b")
+_ASKS_DIRS = re.compile(
+    r"(?i)\b(?:folders?|directories|directory|dirs?|subfolders?|subdirectories)\b")
+_ASKS_ALL = re.compile(r"(?i)\b(?:entries|items|everything|rows|lines|contents)\b")
+# "folders not files" excludes files; "files not folders" excludes folders.
+_NOT_FILES = re.compile(r"(?i)\b(?:not|excluding|except|besides|rather than|instead of)\s+"
+                        r"(?:the\s+)?files?\b")
+_NOT_DIRS = re.compile(r"(?i)\b(?:not|excluding|except|besides|rather than|instead of)\s+"
+                       r"(?:the\s+)?(?:folders?|directories|directory|dirs?)\b")
+
+
+def _enumeration_target(question: str) -> str | None:
+    """files, directories, entries — or None when the question does not say.
+
+    Refusing is the safe answer. A question this cannot read confidently goes to
+    the model, which is slower and right, rather than here, which is instant and
+    guessing.
+    """
+
+    wants_files = bool(_ASKS_FILES.search(question))
+    wants_dirs = bool(_ASKS_DIRS.search(question))
+    wants_all = bool(_ASKS_ALL.search(question))
+
+    if wants_files and wants_dirs:
+        # Both named: the negated one is the one being excluded.
+        if _NOT_FILES.search(question) and not _NOT_DIRS.search(question):
+            return "directories"
+        if _NOT_DIRS.search(question) and not _NOT_FILES.search(question):
+            return "files"
+        return None                      # "files and folders"? Ambiguous — ask the model.
+    if wants_dirs:
+        return "directories"
+    if wants_files:
+        return "files"
+    if wants_all:
+        return "entries"
+    return None
+
+
 def enumeration_answer(question: str, text: str) -> str | None:
     """Count and name what the piped text contains, without asking a model.
 
-    Only for a question that wants everything. Anything selective — "which ports
-    are open", "the files larger than 1MB" — needs judgement and is left alone.
+    Only for a question that wants everything of one clearly named kind. Anything
+    selective — "which ports are open", "files larger than 1MB" — needs judgement
+    and is left alone, and so is anything whose subject cannot be read plainly.
     """
 
     query = (question or "").strip()
@@ -338,21 +381,25 @@ def enumeration_answer(question: str, text: str) -> str | None:
     wants_names = bool(_NAME_ASK.search(query))
     if not (wants_count or wants_names) or _RESTRICTIVE.search(query):
         return None
+    target = _enumeration_target(query)
+    if target is None:
+        return None
 
     entries = _listing_entries(text)
     if entries is None:
         return None
-    folded = query.casefold()
     directories = [name for is_dir, name in entries if is_dir]
     files = [name for is_dir, name in entries if not is_dir]
-    # "how many files" means files; "entries" or "items" means everything listed.
-    everything = any(word in folded for word in ("entries", "items", "lines", "everything"))
-    chosen = [name for _is_dir, name in entries] if everything else files
-    label = "entries" if everything else "files"
+    chosen = {"files": files, "directories": directories,
+              "entries": [name for _is_dir, name in entries]}[target]
+    other = {"files": (len(directories), "directories"),
+             "directories": (len(files), "files"),
+             "entries": (0, "")}[target]
 
-    lines = [f"There are {len(chosen)} {label} in the command output"
-             + (f" ({len(directories)} directories are listed separately)."
-                if directories and not everything else ".")]
+    headline = f"There are {len(chosen)} {target} in the command output"
+    if other[0]:
+        headline += f" ({other[0]} {other[1]} are listed separately)"
+    lines = [headline + "."]
     if wants_names:
         lines.append("")
         lines.extend(f"{index}. {name}" for index, name in enumerate(sorted(chosen), 1))
