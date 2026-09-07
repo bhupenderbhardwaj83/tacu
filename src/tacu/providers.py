@@ -22,7 +22,10 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
     return min(maximum, max(minimum, value))
 
 
-_MAX_NUM_PREDICT = 4096
+# A full listing is a legitimate answer and a long one. Asking for the names of
+# 77 files needs more room than 4096 tokens leaves once a model has spent some of
+# them thinking, and the ceiling only costs anything on the retry path.
+_MAX_NUM_PREDICT = 8192
 _RETRY_NUM_PREDICT = 2048
 
 
@@ -61,7 +64,7 @@ class OllamaProvider:
         self.timeout = timeout
         self.num_ctx = _bounded_env_int("TACU_NUM_CTX", 8192, 2048, 131072)
         # Gemma 4 spends the first tokens on hidden thinking; 256 often never reaches `content`.
-        self.num_predict = _bounded_env_int("TACU_NUM_PREDICT", 1024, 32, 4096)
+        self.num_predict = _bounded_env_int("TACU_NUM_PREDICT", 1024, 32, _MAX_NUM_PREDICT)
         self.repeat_penalty = _bounded_env_float("TACU_REPEAT_PENALTY", 1.1, 1.0, 2.0)
         self.keep_alive = os.environ.get("TACU_KEEP_ALIVE", DEFAULT_KEEP_ALIVE)
 
@@ -91,14 +94,28 @@ class OllamaProvider:
 
     def chat(self, messages: list[dict[str, str]], *, stream: bool) -> Iterable[str]:
         budgets = self.reply_budgets()
-        for budget in budgets:
-            outcome: dict[str, Any] = {}
+        outcome: dict[str, Any] = {}
+        for index, budget in enumerate(budgets):
+            outcome = {}
+            final = index == len(budgets) - 1
             yield from self._chat_once(self.model, messages, stream=stream,
-                                       outcome=outcome, num_predict=budget)
-            if not outcome.get("spent_budget_thinking"):
+                                       outcome=outcome, num_predict=budget,
+                                       can_retry=not final)
+            # Two ways a budget runs out. Only hidden reasoning came back, cut off
+            # mid-thought; or the answer itself was cut off partway — "there are 31
+            # files" followed by twenty of them. Neither is an answer, so widen the
+            # budget and ask again rather than presenting half a list as complete.
+            if not outcome.get("spent_budget_thinking") and not outcome.get("truncated"):
                 return
-            # Only hidden reasoning came back, cut off mid-thought. That is not an
-            # answer, so widen the budget and ask again instead of printing it.
+            if final:
+                break
+        if outcome.get("truncated"):
+            # The longest attempt still ran out. Say so: an answer that stops in the
+            # middle and does not admit it is worse than one that admits it.
+            yield ("\n\n_This answer was cut off at the "
+                   f"{budgets[-1]}-token reply limit and is incomplete. Ask for a "
+                   "narrower slice, or raise the limit with TACU_NUM_PREDICT._")
+            return
         yield ("TACU retried up to a "
                f"{budgets[-1]}-token reply and {self.model} still returned only internal "
                "reasoning, which usually means it is repeating itself rather than "
@@ -107,7 +124,8 @@ class OllamaProvider:
 
     def _chat_once(self, model: str, messages: list[dict[str, str]], *, stream: bool,
                    outcome: dict[str, Any] | None = None,
-                   num_predict: int | None = None) -> Iterable[str]:
+                   num_predict: int | None = None,
+                   can_retry: bool = False) -> Iterable[str]:
         record = outcome if outcome is not None else {}
         budget = self.num_predict if num_predict is None else num_predict
         # Do not send think:false — Ollama 0.32.14 Gemma MLX often returns empty content with it.
@@ -126,7 +144,7 @@ class OllamaProvider:
         try:
             response = urllib.request.urlopen(request, timeout=self.timeout)
             if stream:
-                yielded = False
+                content_bits: list[str] = []
                 thinking_bits: list[str] = []
                 done_reason = ""
                 with response:
@@ -140,11 +158,21 @@ class OllamaProvider:
                             done_reason = event["done_reason"]
                         content, thinking = _assistant_parts(event.get("message") or {})
                         if content:
-                            yielded = True
-                            yield content
+                            # Held rather than emitted: a reply cut off at the token
+                            # limit is retried with a wider budget, and text already
+                            # handed to the caller cannot be taken back.
+                            content_bits.append(content)
                         elif thinking:
                             thinking_bits.append(thinking)
-                if not yielded and thinking_bits:
+                if content_bits:
+                    if done_reason == "length" and can_retry:
+                        record["truncated"] = True
+                        return
+                    if done_reason == "length":
+                        record["truncated"] = True
+                    yield "".join(content_bits)
+                    return
+                if thinking_bits:
                     if done_reason == "length":
                         # Cut off mid-thought: the reasoning is unfinished, not an answer.
                         record["spent_budget_thinking"] = True
@@ -158,6 +186,10 @@ class OllamaProvider:
             message = event.get("message") or {}
             content, thinking = _assistant_parts(message)
             if content.strip():
+                if event.get("done_reason") == "length":
+                    record["truncated"] = True
+                    if can_retry:
+                        return
                 yield content.strip()
             elif thinking.strip():
                 if event.get("done_reason") == "length":

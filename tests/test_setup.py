@@ -953,9 +953,14 @@ class ThinkingBudgetTests(unittest.TestCase):
         self.assertGreater(second["options"]["num_predict"], 1024)
 
     def test_budget_ladder_is_owned_by_the_harness(self) -> None:
+        from tacu.providers import _MAX_NUM_PREDICT
+
         client = self._client(budget="1024")
-        self.assertEqual(client.reply_budgets(), [1024, 2048, 4096])
-        self.assertEqual(client.reply_budgets()[-1], 4096, "escalation must stop at the cap")
+        # Tied to the constant, so raising the cap for long listings does not
+        # need this test edited to agree with it.
+        self.assertEqual(client.reply_budgets(), [1024, 2048, _MAX_NUM_PREDICT])
+        self.assertEqual(client.reply_budgets()[-1], _MAX_NUM_PREDICT,
+                         "escalation must stop at the cap")
 
     def test_every_budget_is_tried_before_giving_up(self) -> None:
         scratchpad = "Looking at the available tools: - ls - find - grep - github_actions"
@@ -966,12 +971,14 @@ class ThinkingBudgetTests(unittest.TestCase):
             text = "".join(client.chat([{"role": "user", "content": "hi"}], stream=True))
         tried = [json.loads(call.args[0].data)["options"]["num_predict"]
                  for call in opened.call_args_list]
-        self.assertEqual(tried, [1024, 2048, 4096])
+        from tacu.providers import _MAX_NUM_PREDICT
+
+        self.assertEqual(tried, [1024, 2048, _MAX_NUM_PREDICT])
         self.assertNotIn("Looking at the available tools", text)
         self.assertNotIn("github_actions", text)
         # The harness owns the budget: never hand the user an env var to set.
         self.assertNotIn("TACU_NUM_PREDICT", text)
-        self.assertIn("4096", text)
+        self.assertIn(str(_MAX_NUM_PREDICT), text)
         self.assertIn("qwen2.5-coder:7b", text)
 
     def test_repeat_penalty_is_sent_to_guard_against_loops(self) -> None:

@@ -2,6 +2,32 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.4.2] - 2026-09-07
+
+### Fixed
+
+- A definitive ask now gets the whole answer. "How many files are there, show their
+  names" reported the count correctly and then listed twenty of thirty-one, stopping
+  mid-list with nothing on screen saying the answer was partial — the count was right
+  and the list was short, which is the worst of both.
+- The cause was not the model or the token budget: evidence with more than 24 lines
+  was cut to its first 24 before the model ever saw it. A 34-line `ls -la` is 2,633
+  characters against a 20,000-character budget and was still sampled. Everything that
+  fits the budget is now sent whole.
+- When input genuinely exceeds the budget, both ends are kept and the gap is stated —
+  `[TACU omitted N middle line(s) of M]`. Previously input between 25 and 48 lines
+  lost its tail entirely, with no marker at all.
+- A reply cut off at the token limit is now retried with a wider budget instead of
+  being handed over as though it were finished. Only a reply with *empty* content was
+  retried before, so a half-written list was streamed out and presented as complete.
+  If the widest attempt still runs out, the answer says it is incomplete.
+- The reply ceiling rises from 4096 to 8192 tokens. Naming 77 files needs more room
+  than 4096 leaves once a model has spent some of it thinking; at 4096 it returned
+  nothing at all. The ceiling only costs anything on the retry path.
+- The answer writer was told to use at most 60 words for host facts, with no exception
+  for being asked to list things. Listing, naming, showing and counting are now exempt,
+  and it is told never to stop a list partway or state a count it does not then list.
+
 ## [0.4.1] - 2026-09-07
 
 ### Fixed

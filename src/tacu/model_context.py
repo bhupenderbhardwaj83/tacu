@@ -39,6 +39,17 @@ def prune_text(text: str, question: str, budget: int) -> tuple[str, dict[str, An
             duplicates += 1; continue
         if normalized: seen.add(normalized)
         unique.append((index, line[:2_000]))
+    # Everything that fits, goes. Head-and-tail sampling is for input too large to
+    # send, not for input that merely has more than 24 lines: a 34-line `ls -la`
+    # was cut to its first 24 and the model then listed 20 of 31 files and stopped,
+    # confidently, because the rest was never shown to it.
+    whole = "\n".join(line for _, line in unique)
+    if len(whole) <= budget:
+        metadata = {"original_lines": len(original_lines), "kept_lines": len(unique),
+                    "duplicates_removed": duplicates, "original_chars": len(text),
+                    "kept_chars": len(whole), "complete": True}
+        return whole, metadata
+
     words = _keywords(question)
     relevant_indexes: set[int] = set()
     for index, line in unique:
@@ -52,7 +63,11 @@ def prune_text(text: str, question: str, budget: int) -> tuple[str, dict[str, An
     if relevant:
         sections.extend(("[TACU relevant lines]", *relevant[:160]))
     sections.extend(("[TACU output start]", *head))
-    if len(unique) > 48: sections.extend(("[TACU output end]", *tail))
+    # Whenever lines are dropped the end is shown too, and the gap is named, so a
+    # partial view is never mistaken for the whole thing.
+    if len(unique) > len(head):
+        sections.extend((f"[TACU omitted {len(unique) - len(head) - len(tail)} middle line(s) "
+                         f"of {len(unique)}]", *tail))
     compact = "\n".join(sections)
     if len(compact) > budget:
         half = max(1, (budget - 80) // 2)
