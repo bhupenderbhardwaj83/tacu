@@ -2,6 +2,29 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.4.1] - 2026-09-07
+
+### Fixed
+
+- Piped input was ignored by `ti auto`, `ti do` and `ti code`. Those verbs return
+  before the block that reads stdin, so `nmap … | ti auto which ports are open`
+  threw away the scan it was handed and reported this machine's own listening
+  ports — a confident answer about the wrong computer. All four verbs now read
+  what was piped in.
+- `ti ask` discarded piped evidence too, by a different route: a host-shaped
+  question promoted itself to a host inspection and dropped the supplied data on
+  the way, which is where the "10 listening ports … depth limit" answer came from.
+  It no longer promotes when something was piped in.
+- Piping means "here is the data", so asking the host about itself can only be
+  wrong. Only a request that changes something — writing a file, stopping a
+  container, launching an application — still plans; everything else is answered
+  from the input.
+- "which database ports are open in this **output**" tried to launch an application
+  called "output". Words for the text in front of you — output, results, log, scan,
+  report, response, listing and the rest — are no longer read as application names.
+- An empty pipe (`ti ask … < /dev/null`) was treated as evidence, which answered
+  every host question with "nothing here". Nothing piped in is nothing piped in.
+
 ## [0.4.0] - 2026-09-06
 
 ### Added

@@ -1381,6 +1381,11 @@ def _clean_app_name(raw: str) -> str:
 _NOT_AN_APP = frozenset((
     "directory", "folder", "file", "files", "project", "workspace", "path", "repo",
     "repository", "page", "site", "website", "server", "script", "code", "terminal window",
+    # Words for the text in front of you. "which ports are open in this output"
+    # named an application called "output" and tried to launch it.
+    "output", "outputs", "result", "results", "response", "text", "data", "log",
+    "logs", "list", "listing", "scan", "report", "input", "content", "contents",
+    "table", "summary", "answer", "message", "console", "screen", "above", "below",
 ))
 
 

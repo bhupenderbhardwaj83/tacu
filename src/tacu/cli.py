@@ -3205,10 +3205,50 @@ def _coding_client(arguments: argparse.Namespace) -> ModelProvider:
                          timeout=arguments.timeout)
 
 
+def _piped_evidence(arguments: argparse.Namespace) -> dict[str, Any] | None:
+    """Read what was piped in, so the intent verbs can see it too.
+
+    `ti ask` read piped input and the intent verbs did not, because they return
+    before the block that captures it. So `nmap … | ti auto which ports are open`
+    ignored the scan it was handed and reported the local machine's own listening
+    ports instead — a confidently wrong answer about the wrong computer.
+    """
+
+    if sys.stdin.isatty():
+        return None
+    captured, raw_artifacts, report = capture_piped_input(arguments.timeout)
+    warn_if_truncated(report)
+    if not captured:
+        return None
+    return content_result(source="stdin", label="piped stdin",
+                          data=captured, raw_artifacts=raw_artifacts)
+
+
+def _pipe_is_the_subject(intent: str) -> bool:
+    """Was the piped text handed over to be read, or is it context for an action?
+
+    Piping means "here is the data". Asking the host about itself can only be
+    wrong then, because the answer was already supplied. Only a request that
+    changes something still needs a plan.
+    """
+
+    return not (intent_mutates_workspace(intent) or extract_file_write(intent)
+                or intent_wants_host_mutate(intent))
+
+
 def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) -> int:
     autonomous = arguments.subcommand == "auto"
     intent = _intent_text(arguments.intent)
     workspace = _intent_workspace(arguments.workspace)
+    piped = _piped_evidence(arguments)
+    if piped is not None and _pipe_is_the_subject(intent):
+        # The data was handed in; read it rather than going to look for other data.
+        question = intent or "Analyze this input and report the important findings."
+        evidence = apply_pipe_filter(piped, question, FilterOptions())
+        with HistoryStore(app_home() / "history.db") as store:
+            ask(store=store, client=client, query=question, tool_result=evidence,
+                stream=not arguments.no_stream)
+        return 0
     if intent_mutates_workspace(intent):
         workspace = confirm_write_location(
             workspace, dry_run=arguments.dry_run, explicit=arguments.workspace is not None,
@@ -4734,6 +4774,10 @@ def _main(argv: list[str] | None = None) -> int:
                     captured, raw_artifacts, report = capture_piped_input(
                         arguments.timeout, grep=filter_opts.grep)
                     warn_if_truncated(report)
+                if not sys.stdin.isatty() and captured:
+                    # An empty pipe — `ti ask … < /dev/null`, or a redirect with
+                    # nothing behind it — is not evidence, and treating it as
+                    # evidence answers every host question with "nothing here".
                     evidence = content_result(source="stdin", label="piped stdin",
                                               data=captured, raw_artifacts=raw_artifacts)
                     evidence = apply_stream_grep(evidence, report)
@@ -4757,7 +4801,11 @@ def _main(argv: list[str] | None = None) -> int:
                 # A question about this machine gets a real answer from a native tool.
                 # Explanatory wording ("explain RAM versus disk") is a language task, so
                 # it stays here and is never promoted to a host inspection.
-                if (query and not intent_is_explanatory(query)
+                # Never when something was piped in: promoting to a host inspection
+                # there throws the supplied data away and answers about this
+                # machine instead, which is how a piped nmap scan was answered
+                # with the local listening ports.
+                if (query and evidence is None and not intent_is_explanatory(query)
                         and native_steps_for_intent(query)
                         and not exact_answer(query, evidence)):
                     arguments.subcommand = "auto"
