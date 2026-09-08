@@ -62,3 +62,9 @@ enhancement_plans/
 *.log
 artifacts/
 exports/
+
+# Juicy scan output: reports land beside the scan, and a bare -o writes here.
+_juicy_reports/
+_Juicy_*.csv
+_Juicy_*.jsonl
+tacu-juicy-*.csv
