@@ -65,6 +65,20 @@ def _terminal_width() -> int:
     return shutil.get_terminal_size(fallback=(120, 24)).columns
 
 
+def _recipes(*lines: tuple[str, str]) -> None:
+    """A few worked commands under an entry, paired with what each is for.
+
+    One example per command shows the shape; it does not show the sequence. These
+    are the commands people actually string together — load then ask, scan then
+    narrow — so the order is the lesson as much as the syntax.
+    """
+
+    width = max(len(command) for command, _purpose in lines)
+    for command, purpose in lines:
+        print(paint(f"{_ENTRY_INDENT}  {command.ljust(width)}", PALETTE.text)
+              + paint(f"   {purpose}", PALETTE.dim + PALETTE.muted))
+
+
 def _entry(name: str, syntax: str, example: str, does: str, *, ai: bool = False,
            width: int | None = None) -> None:
     """Uniform help entry used by every topic.
@@ -1362,6 +1376,14 @@ def print_quick_help() -> None:
            "ti juicy dump.csv --ask is ada@example.com in the data",
            "Scans a file or project tree for secrets and identifiers locally. Inventory first; "
            "--ask filters the findings before the model sees that slice.")
+    _recipes(
+        ("ti juicy ~/projects/api", "whole tree: hardcoded secrets, keys, tokens, PII"),
+        ("ti juicy ~/projects --min-confidence high", "only what it is sure about"),
+        ("ti juicy ~/projects --kind password,secret,aws-access-key", "just credentials"),
+        ("ti juicy ~/projects --kind email,indian-phone,aadhaar", "just personal data"),
+        ("ti juicy ~/projects --ask what should I rotate first", "findings, then a judgement"),
+        ("cat scan.txt | ti juicy -", "straight off a pipe; the - means stdin"),
+    )
     _entry("extract", "ti extract juicy|ji FILE|DIR [-o OUT]",
            "ti extract juicy scan.txt -o findings.csv",
            "The explicit extractor form of ti juicy. It uses the same scanner and flags; ji is "
@@ -1373,6 +1395,15 @@ def print_quick_help() -> None:
            "ti data load big.csv --name logs",
            "Streams CSV, JSON, PCAP, Burp, SQLite, registry, XLSX, or text into a temporary "
            "read-only store, then queries small result slices instead of prompting with the file.")
+    _recipes(
+        ("ti data load access.log.csv --name web", "load once; everything after uses the name"),
+        ("ti data show web", "columns, row count, and what each column holds"),
+        ("ti data ask web which IPs hit /admin most", "plain English, answered from a SQL slice"),
+        ("ti data query web \"SELECT status, COUNT(*) FROM data GROUP BY status\"",
+         "when you already know the SQL"),
+        ("ti data load capture.pcapng --name pkts", "PCAP too: src, dst, ports, hostnames"),
+        ("ti data juicy web   ·   ti data rm web", "secrets in the rows; drop it when done"),
+    )
     print()
 
     _zone("WEB / TOOLS / CONTAINERS")
@@ -1383,6 +1414,13 @@ def print_quick_help() -> None:
     _entry("tools", "ti tools map|find|search|read|write|edit …", "ti tools map . --depth 3",
            "Structured file operations that stay inside the workspace guard, so you get predictable "
            "output instead of hand-written shell pipelines. See ti help tools for each shape.")
+    _recipes(
+        ("ti tools map . --depth 2", "the shape of a project before reading any of it"),
+        ("ti tools find '*.env' .", "by name or glob — the pattern first, then where"),
+        ("ti tools search API_KEY src", "ripgrep when installed, a stdlib walk when not"),
+        ("ti tools read src/app.py --start 40 --end 80", "an exact range, with line numbers"),
+        ("ti tools list   ·   ti tools examples", "every tool's shape; longer recipes"),
+    )
     _entry("docker", "ti docker CONTAINER -q QUESTION -- COMMAND",
            "ti docker kali -q explain these SMB findings -- nxc smb 10.0.0.5",
            "Runs a command inside an existing container, then answers -q from that stdout. TACU "

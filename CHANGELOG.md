@@ -2,6 +2,28 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.5.4] - 2026-09-08
+
+### Changed
+
+- `ti help` now shows worked examples under `ti data`, `ti juicy` and `ti tools`,
+  not just one line of syntax each. A single example shows the shape of a command;
+  these show the sequence people actually use — load then inspect then ask, scan
+  then narrow, map then search then read — which is the part that is hard to guess.
+- The overview's line cap moved from 160 to 185 to fit them. It still guards against
+  sprawl; the reason for the change is recorded beside the assertion.
+
+### Fixed
+
+- Two of the new examples were wrong when written and were caught by running them:
+  `ti tools find` and `ti tools search` take the pattern first and the path second,
+  not the other way round.
+- `--grep` on a juicy scan filters findings by their **value**, not the input before
+  scanning, and the example said otherwise. A piped scan needs `ti juicy -`; bare
+  `ti juicy` on a pipe prints the help page.
+- A test now checks every flag and subcommand shown in those examples against
+  argparse, so an example cannot describe a command TACU does not have.
+
 ## [0.5.3] - 2026-09-08
 
 ### Changed

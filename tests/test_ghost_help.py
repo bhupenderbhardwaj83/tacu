@@ -246,3 +246,71 @@ class ReadmeTests(unittest.TestCase):
             pages.append(strip_ansi(shown.getvalue()))
         self.assertEqual(pages[0], pages[1], "the README says these are identical")
 
+class HelpExampleTests(unittest.TestCase):
+    """Examples in the overview must be commands that actually run."""
+
+    def overview(self) -> str:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from tacu.helptext import print_quick_help
+        from tacu.theme import strip_ansi
+
+        shown = StringIO()
+        with redirect_stdout(shown):
+            print_quick_help()
+        return strip_ansi(shown.getvalue())
+
+    def examples_for(self, verb: str) -> list[str]:
+        import re
+
+        return [line.strip() for line in self.overview().splitlines()
+                if re.match(rf"^\s+ti {verb} ", line)]
+
+    def test_data_juicy_and_tools_each_show_a_sequence(self) -> None:
+        for verb in ("data", "juicy", "tools"):
+            with self.subTest(verb=verb):
+                # One example shows the shape; several show how they are strung together.
+                self.assertGreaterEqual(len(self.examples_for(verb)), 4, verb)
+
+    def test_every_flag_shown_exists(self) -> None:
+        import re
+
+        from tacu.cli import parser
+
+        root = parser()
+        subs = next(a for a in root._subparsers._group_actions if a.choices)
+        for verb in ("data", "juicy", "tools"):
+            available = set()
+            command = subs.choices.get(verb)
+            for action in command._actions:
+                available |= set(action.option_strings)
+                if getattr(action, "choices", None) and hasattr(action.choices, "keys"):
+                    for nested in action.choices.values():
+                        for inner in nested._actions:
+                            available |= set(inner.option_strings)
+            for line in self.examples_for(verb):
+                for flag in re.findall(r"(?<!\S)(--[a-z][a-z-]+)", line):
+                    with self.subTest(verb=verb, flag=flag):
+                        self.assertIn(flag, available, f"{line}: {flag} does not exist")
+
+    def test_every_subcommand_shown_exists(self) -> None:
+        import re
+
+        from tacu.cli import parser
+
+        root = parser()
+        subs = next(a for a in root._subparsers._group_actions if a.choices)
+        for verb in ("data", "tools"):
+            command = subs.choices[verb]
+            actions = set()
+            for action in command._actions:
+                if getattr(action, "choices", None) and hasattr(action.choices, "keys"):
+                    actions = set(action.choices)
+                    break
+            for line in self.examples_for(verb):
+                word = line.split()[2] if len(line.split()) > 2 else ""
+                if word and not word.startswith("-"):
+                    with self.subTest(verb=verb, action=word):
+                        self.assertIn(word, actions, f"{line}: {word} is not a {verb} action")
+

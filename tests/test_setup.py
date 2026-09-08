@@ -436,7 +436,10 @@ class SetupTests(unittest.TestCase):
         from tacu.theme import strip_ansi
         plain = strip_ansi(quick)
         # Quick help must stay scannable; every first-class command is listed.
-        self.assertLessEqual(plain.count("\n"), 160)
+        # Raised from 160 when worked examples were added under data, juicy and
+        # tools: the overview shows how those commands are strung together, not
+        # only their shape. The cap still guards against sprawl.
+        self.assertLessEqual(plain.count("\n"), 185)
         self.assertIn("FINDINGS", plain)
         self.assertIn("ti juicy", plain)
         self.assertIn("ti extract juicy", plain)

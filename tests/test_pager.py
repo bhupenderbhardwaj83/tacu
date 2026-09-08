@@ -170,7 +170,7 @@ class HelpStillDumpsWhenCapturedTests(unittest.TestCase):
         snapshots: list[str] = []
         # The complete command catalog spans several pages; keep advancing until
         # the final global-options box has been rendered.
-        keys = [" "] * 8
+        keys = [" "] * 10
 
         def read_key(_stdin=None) -> str:
             snapshots.append(strip_ansi(out.getvalue()))
