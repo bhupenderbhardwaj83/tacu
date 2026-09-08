@@ -139,14 +139,23 @@ CODING_TOOL_SURFACE: tuple[str, ...] = (
 )
 
 
-def coding_tool_schemas() -> list[dict[str, Any]]:
-    """The coding tools in the shape Ollama's native tool calling expects."""
+# The tools that only look. A question about this machine or this codebase is
+# answered by reading it — the alternative, when routing cannot build arguments,
+# has been to ask the model with no evidence at all, and it answers anyway.
+ANSWER_TOOL_SURFACE: tuple[str, ...] = (
+    "filesystem", "read_file", "search_code", "repo_map", "inspect_symbol",
+    "system", "process", "network", "application",
+)
+
+
+def tool_schemas(surface: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Named tools in the shape Ollama's native tool calling expects."""
 
     from .tools import specs
 
-    wanted = {spec.name: spec for spec in specs() if spec.name in CODING_TOOL_SURFACE}
+    wanted = {spec.name: spec for spec in specs() if spec.name in surface}
     schemas: list[dict[str, Any]] = []
-    for name in CODING_TOOL_SURFACE:
+    for name in surface:
         spec = wanted.get(name)
         if spec is None:
             continue
@@ -159,3 +168,11 @@ def coding_tool_schemas() -> list[dict[str, Any]]:
             },
         })
     return schemas
+
+
+def coding_tool_schemas() -> list[dict[str, Any]]:
+    return tool_schemas(CODING_TOOL_SURFACE)
+
+
+def answer_tool_schemas() -> list[dict[str, Any]]:
+    return tool_schemas(ANSWER_TOOL_SURFACE)

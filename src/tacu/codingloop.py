@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .codingguard import CodingGuard
+from .escalation import RunSignals, escalation_reason, make_room_for
 from .snapshot import Snapshot
 from .todo import TODO_WRITE_SCHEMA, TodoList
 
@@ -78,6 +79,13 @@ class CodingLoop:
     dispatch: Callable[[str, dict[str, Any]], dict[str, Any]]
     max_steps: int = 12
     on_event: Callable[[str, str], None] | None = None
+    # Given a model name, hand back a client for it. Absent means no escalation:
+    # the run finishes with the model it started with, or says it could not.
+    escalate_to: str = ""
+    make_client: Callable[[str], Any] | None = None
+    # A run that only reads: no task list to keep, and nothing that could ever
+    # change, so "nothing has changed yet" is not evidence of being stuck.
+    read_only: bool = False
 
     def __post_init__(self) -> None:
         self.workspace = self.workspace.resolve()
@@ -85,7 +93,10 @@ class CodingLoop:
         self.guard = CodingGuard(workspace=self.workspace)
         self.snapshot = Snapshot(workspace=self.workspace)
         self.history: list[dict[str, Any]] = []
-        self.schemas = list(self.tools) + [TODO_WRITE_SCHEMA]
+        self.schemas = list(self.tools) if self.read_only else list(self.tools) + [TODO_WRITE_SCHEMA]
+        self.signals = RunSignals(budget=self.max_steps)
+        self.known = {schema["function"]["name"] for schema in self.schemas}
+        self.escalated = False
 
     def _say(self, kind: str, message: str) -> None:
         if self.on_event is not None:
@@ -138,6 +149,33 @@ class CodingLoop:
         self.guard.observe(name, arguments, result if isinstance(result, dict) else {})
         return result if isinstance(result, dict) else {"status": "success", "result": result}
 
+
+    def _maybe_escalate(self) -> None:
+        """Move up to the stronger model once the run has shown it is stuck.
+
+        Once only. A second model that cannot finish the job is a job that needs
+        a person, not a third attempt, and the run says so rather than churning.
+        """
+
+        if self.escalated or not self.escalate_to or self.make_client is None:
+            return
+        reason = escalation_reason(self.signals)
+        if reason is None:
+            return
+        self.escalated = True
+        released = make_room_for(self.escalate_to)
+        if released:
+            self._say("models", f"unloaded {', '.join(released)} to make room")
+        try:
+            self.client = self.make_client(self.escalate_to)
+        except Exception as error:                     # keep going with what works
+            self._say("refused", f"could not switch to {self.escalate_to}: {error}")
+            return
+        self._say("escalate", f"{reason} — continuing with {self.escalate_to}")
+        # The stronger model starts from the same state, so nothing already done
+        # is repeated; only the reasoning that was going nowhere is dropped.
+        self.signals = RunSignals(budget=self.max_steps)
+
     def run(self) -> LoopOutcome:
         self.history.append({"role": "user", "content": self.goal})
         actions = 0
@@ -153,12 +191,18 @@ class CodingLoop:
                 return LoopOutcome(False, str(error), actions, self.snapshot.changed(),
                                    self.guard.verified, stopped="model error")
             calls = reply.get("tool_calls") or []
+            self.signals.note_turn(calls=len(calls), content=reply.get("content") or "",
+                                   done_reason=reply.get("done_reason") or "")
+            self.signals.changed_anything = bool(self.guard.mutated) or self.read_only
+            self.signals.verified = self.guard.verified or self.read_only
+            self._maybe_escalate()
 
             if not calls:
                 answer = reply.get("content") or ""
                 refusal = self.guard.refuse_completion()
                 if refusal:
                     self._say("refused", refusal)
+                    self.signals.note_refusal()
                     self.history.append({"role": "assistant", "content": answer})
                     self.history.append({"role": "user", "content": refusal})
                     continue
@@ -168,6 +212,8 @@ class CodingLoop:
 
             for call in calls[:1]:                     # one action per turn, by design
                 name, arguments = call["name"], call["arguments"]
+                self.signals.note_call(name, json.dumps(arguments, sort_keys=True, default=str),
+                                       name in self.known)
                 if name != "todo_write":
                     actions += 1
                 self._say("call", f"{name}({', '.join(sorted(arguments))})")

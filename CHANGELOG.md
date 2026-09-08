@@ -2,6 +2,46 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.5.0] - 2026-09-08
+
+### Changed
+
+- `ti code` now **starts on the small model and steps up when it stalls**, rather than
+  loading the 27B planner for every job. Which jobs need the bigger model cannot be
+  read from the wording — both installed models answer "refactor the auth module"
+  with a single tool call — so the decision is made from evidence during the run,
+  never predicted from the request.
+- A run steps up when it has shown it is going nowhere: two turns producing neither
+  an action nor an answer, two replies running out of room, the same call made three
+  times, a tool that does not exist, or half the budget spent with nothing changed
+  and nothing checked. It steps up **once**; a second model that cannot finish is a
+  job that needs a person, not a third attempt.
+- The model being left behind is unloaded on the way. Ollama holds a model for its
+  keep-alive after the last request, so without this the small model keeps memory the
+  bigger one needs for fifteen minutes.
+- `ti code` no longer refuses when the bigger model is missing. It runs on the small
+  one and says that stepping up is unavailable, because the small model is now the
+  starting point rather than the fallback.
+
+### Added
+
+- **`ti ask` looks before it answers.** When routing picks a capability but cannot
+  derive its arguments, the whole path used to be abandoned and the question reached
+  the model with no evidence and no way to look. Asked whether any `.md` files were in
+  a directory holding twenty-three of them, it answered "No, there are none". A
+  factual question now runs an agent loop over the read-only tools instead, and when
+  looking does not settle it, it says so rather than filling the gap with prose.
+- `ti code --dry-run` shows the workspace, the tool surface, the budget and the
+  escalation target, and runs nothing. It was documented but had no effect: the loop
+  ignored the flag and ran the job.
+
+### Fixed
+
+- A read-only run is no longer judged for not changing anything. The stall signal
+  "nothing has changed or been checked" is meaningless when nothing can change, and
+  it was escalating lookups after three reads. Read-only runs are also not given a
+  task list, which was spending half a short budget on bookkeeping.
+
 ## [0.4.4] - 2026-09-07
 
 ### Changed

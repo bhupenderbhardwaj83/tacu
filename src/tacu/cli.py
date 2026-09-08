@@ -3173,24 +3173,21 @@ def _step_fingerprint(step: Any) -> str:
 
 
 def _coding_client(arguments: argparse.Namespace) -> ModelProvider:
-    """Point this run at the coding planner, and give it the memory to work in.
+    """Start on the small model, and be ready to hand over to the bigger one.
 
-    Refuses rather than falling back: a long-horizon task planned by the small
-    model is the failure `ti code` exists to avoid, and silently substituting it
-    would make the verb a lie.
+    Most jobs are ordinary and the small model is quicker and lighter for them.
+    Which jobs are not ordinary cannot be told from the wording — both models
+    answer "refactor the auth module" with a single tool call — so the run starts
+    small and moves up when it has shown it is stuck. See escalation.py.
     """
 
     from . import coding
 
-    model = coding.coding_model()
-    if not coding.model_is_installed(model):
-        raise TacuError(coding.missing_model_message(model))
-
-    if not getattr(arguments, "keep_models", False):
-        released = coding.release_other_models(model)
-        if released:
-            print(paint(f"  models · unloaded {', '.join(released)} to leave room for {model}",
-                        PALETTE.muted))
+    stronger = coding.coding_model()
+    arguments.escalate_to = stronger if coding.model_is_installed(stronger) else ""
+    if not arguments.escalate_to:
+        print(paint(f"  note · {stronger} is not installed, so this run cannot step up "
+                    f"to it. Install it with: ollama pull {stronger}", PALETTE.yellow))
 
     profile = coding.PROFILE
     # A reasoning model spends its first tokens thinking, so the budgets that
@@ -3203,9 +3200,11 @@ def _coding_client(arguments: argparse.Namespace) -> ModelProvider:
     if getattr(arguments, "timeout", 0) and arguments.timeout < profile.timeout:
         arguments.timeout = profile.timeout
     arguments.coding_profile = True
-    print(paint(f"CODE  planning with {model} · {arguments.max_steps} step budget",
+    starting = arguments.model or configured_model() or default_chat_model()
+    step_up = f" · steps up to {arguments.escalate_to} if it stalls" if arguments.escalate_to else ""
+    print(paint(f"CODE  starting with {starting} · {arguments.max_steps} step budget{step_up}",
                 PALETTE.accent + PALETTE.bold))
-    return load_provider(arguments.provider, base_url=arguments.url, model=model,
+    return load_provider(arguments.provider, base_url=arguments.url, model=starting,
                          timeout=arguments.timeout)
 
 
@@ -3240,6 +3239,87 @@ def _pipe_is_the_subject(intent: str) -> bool:
                 or intent_wants_host_mutate(intent))
 
 
+def _looks_up_facts(query: str) -> bool:
+    """Is this a question about this machine or this codebase, rather than language?
+
+    A factual question deserves a look. A request to translate, rephrase or
+    explain a concept does not, and dragging tools into it would be worse than
+    useless.
+    """
+
+    if not query or intent_is_explanatory(query) or is_language_question(query):
+        return False
+    return bool(re.search(
+        r"(?i)\b(?:is|are|was|were|do|does|did|how many|how much|which|what|where|"
+        r"list|show|find|count|any)\b", query))
+
+
+def _answer_by_looking(query: str, client: ModelProvider, arguments: argparse.Namespace,
+                       store: HistoryStore) -> int:
+    """Answer a factual question by using tools, not by asking the model blind.
+
+    This is the path that used to end in a confident invention. Routing picks a
+    capability by keyword and its arguments by regex; when the regex finds
+    nothing the whole capability is dropped, and the question reached the model
+    with no evidence and no way to look. "Is there any .md file inside
+    not_required" was answered "No" while twenty-two of them sat on disk.
+    """
+
+    from . import coding as coding_module
+    from .codingloop import CodingLoop
+
+    workspace = _intent_workspace(getattr(arguments, "workspace", None))
+
+    def dispatch(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        context = ToolContext(workspace, app_home())
+        result = invoke_tool(name, payload, context)
+        data = dict(result.data or {})
+        data.setdefault("status", "success" if result.ok else "error")
+        if not result.ok and result.error:
+            data["error"] = result.error
+        return data
+
+    def announce(kind: str, message: str) -> None:
+        if kind == "call":
+            print(paint(f"  → {message}", PALETTE.muted))
+        elif kind == "escalate":
+            print(paint(f"  ↑ {message}", PALETTE.accent + PALETTE.bold))
+        elif kind == "models":
+            print(paint(f"  models · {message}", PALETTE.muted))
+
+    loop = CodingLoop(workspace=workspace, goal=query, client=client,
+                      tools=coding_module.answer_tool_schemas(), dispatch=dispatch,
+                      max_steps=LOOKUP_STEPS, on_event=announce, read_only=True,
+                      escalate_to=_stronger_model(), make_client=lambda model: load_provider(
+                          arguments.provider, base_url=arguments.url, model=model,
+                          timeout=arguments.timeout))
+    outcome = loop.run()
+    if not outcome.completed or not outcome.answer.strip():
+        # Never fill the gap with prose: say the looking did not settle it.
+        body = (f"I could not settle this by looking. {outcome.steps} action(s) were run "
+                f"and nothing conclusive came back. Try naming the directory or file "
+                f"you mean, or run: ti code {query}")
+    else:
+        body = outcome.answer.strip()
+    response = normalize_answer_for_storage(body)
+    print(render_answer(response, query=query))
+    store.add(model=f"{client.model}/looked", query=query, response=response, tool_result=None)
+    return 0
+
+
+def _stronger_model() -> str:
+    """The model a stalled lookup steps up to, when it is installed."""
+
+    from . import coding
+
+    candidate = coding.coding_model()
+    return candidate if coding.model_is_installed(candidate) else ""
+
+
+# A factual lookup is a handful of reads, not a build.
+LOOKUP_STEPS = 8
+
+
 def handle_coding_command(arguments: argparse.Namespace, client: ModelProvider) -> int:
     """Run one coding job as a step-at-a-time loop rather than a batch plan."""
 
@@ -3265,12 +3345,35 @@ def handle_coding_command(arguments: argparse.Namespace, client: ModelProvider) 
             print(paint(f"  → {message}", PALETTE.muted))
         elif kind == "refused":
             print(paint(f"  ✗ {message}", PALETTE.yellow))
+        elif kind == "escalate":
+            print(paint(f"  ↑ {message}", PALETTE.accent + PALETTE.bold))
+        elif kind == "models":
+            print(paint(f"  models · {message}", PALETTE.muted))
         elif kind == "done":
             print(paint(f"  ✓ {message}", PALETTE.green))
 
+    def stronger_client(model: str) -> ModelProvider:
+        return load_provider(arguments.provider, base_url=arguments.url, model=model,
+                             timeout=arguments.timeout)
+
+    if getattr(arguments, "dry_run", False):
+        # A loop has no plan to show before it starts — it decides each action from
+        # the result of the last. What can honestly be shown is the setup.
+        print(paint(f"CODE  {intent}", PALETTE.accent + PALETTE.bold))
+        print(paint(f"  workspace : {workspace}", PALETTE.muted))
+        print(paint("  tools     : " + ", ".join(coding_module.CODING_TOOL_SURFACE)
+                    + ", todo_write", PALETTE.muted))
+        print(paint(f"  budget    : {arguments.max_steps} actions", PALETTE.muted))
+        print(paint(f"  escalation: {getattr(arguments, 'escalate_to', '') or 'none available'}",
+                    PALETTE.muted))
+        print(paint("DRY RUN · nothing was run.", PALETTE.green + PALETTE.bold))
+        return 0
+
     loop = CodingLoop(workspace=workspace, goal=intent, client=client,
                       tools=coding_module.coding_tool_schemas(), dispatch=dispatch,
-                      max_steps=arguments.max_steps, on_event=announce)
+                      max_steps=arguments.max_steps, on_event=announce,
+                      escalate_to=getattr(arguments, "escalate_to", ""),
+                      make_client=stronger_client)
     print(paint(f"CODE  {intent}", PALETTE.accent + PALETTE.bold))
     print(paint(f"  workspace: {workspace}", PALETTE.muted))
 
@@ -4890,6 +4993,10 @@ def _main(argv: list[str] | None = None) -> int:
                     arguments.max_steps = getattr(arguments, "max_steps", 3)
                     arguments.dry_run = False
                     return handle_intent_command(arguments, client)
+                # Routing found nothing it could build. A factual question is
+                # answered by looking, never by asking the model with no evidence.
+                if query and evidence is None and _looks_up_facts(query):
+                    return _answer_by_looking(query, client, arguments, store)
                 ask(store=store, client=client, query=query, tool_result=evidence, stream=stream)
             elif arguments.subcommand in {"run", "companion", "focus"}:
                 argv = normalized_command(arguments.command)
