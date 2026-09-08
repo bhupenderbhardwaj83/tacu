@@ -137,3 +137,53 @@ class GhostSuggestionSafetyTests(unittest.TestCase):
             path = handle.name
         result = subprocess.run([zsh, "-n", path], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+class CodingSectionTests(unittest.TestCase):
+    """Coding is a lane of its own, not a memory-and-export utility."""
+
+    def overview(self) -> str:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from tacu.helptext import print_quick_help
+        from tacu.theme import strip_ansi
+
+        shown = StringIO()
+        with redirect_stdout(shown):
+            print_quick_help()
+        return strip_ansi(shown.getvalue())
+
+    def test_code_is_one_of_the_verbs_to_pick_between(self) -> None:
+        body = self.overview()
+        pick = body.split("PICK ONE", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("code", pick)
+        for sibling in ("ask", "auto", "run"):
+            self.assertIn(sibling, pick)
+
+    def test_coding_has_its_own_section(self) -> None:
+        body = self.overview()
+        self.assertIn("CODING / SCRIPTING", body)
+        coding = body.split("CODING / SCRIPTING", 1)[1].split("MEMORY / EXPORT", 1)[0]
+        self.assertIn("ti code INTENT", coding)
+
+    def test_code_is_not_filed_under_memory_and_export(self) -> None:
+        body = self.overview()
+        memory = body.split("MEMORY / EXPORT", 1)[1]
+        self.assertNotIn("ti code INTENT", memory)
+
+    def test_the_help_describes_what_it_now_does(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from tacu.helptext import print_code_help
+        from tacu.theme import strip_ansi
+
+        shown = StringIO()
+        with redirect_stdout(shown):
+            print_code_help()
+        page = strip_ansi(shown.getvalue()).casefold()
+        # It starts small and steps up; it no longer refuses without the big model.
+        self.assertIn("steps up", page)
+        self.assertNotIn("refuses rather than", page)
+        self.assertIn("one action at a time", page)
+

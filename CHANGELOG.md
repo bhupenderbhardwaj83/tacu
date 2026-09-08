@@ -2,6 +2,21 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.5.1] - 2026-09-08
+
+### Changed
+
+- `ti code` is now one of the verbs in **PICK ONE**, alongside `ask`, `auto` and `run`.
+  Choosing a lane is the first thing anyone does, and coding was not offered there.
+- Long-horizon coding has its own **CODING / SCRIPTING** section rather than sitting at
+  the end of MEMORY / EXPORT beside `backup` and `clear`. The section covers the verb,
+  `--dry-run`, what "proved" means, and how the model is chosen.
+- The help for `ti code` described the previous design and was wrong after 0.5.0. It
+  said the lane planned with a larger model up front and refused without it; it now
+  says what happens — one action at a time, starting on the default model and stepping
+  up only when a run stalls. `--dry-run` no longer claims to "show the plan", because
+  a loop has no plan to show.
+
 ## [0.5.0] - 2026-09-08
 
 ### Changed

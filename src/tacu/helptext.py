@@ -866,36 +866,45 @@ def print_migrate_help() -> None:
 
 def print_code_help() -> None:
     print(_heading("ti code — long-horizon coding and scripting"))
-    print(paint("WHAT: The same harness, planned by a model big enough to hold a multi-step build.",
+    print(paint("WHAT: One action at a time — read, edit, run the tests — not a plan made up front.",
                 PALETTE.text))
     print(paint("WHEN: Work that spans several files and commands — scaffold, install, wire, run.",
                 PALETTE.text))
-    print(paint("WHY:  A 12B planner returns a good four-step plan about half the time; the rest "
-                "is truncated JSON and timeouts.", PALETTE.text))
+    print(paint("WHY:  A plan written before anything is read has to guess at the arguments of its "
+                "later steps, and a wrong guess corrupts the file the next step edits.", PALETTE.text))
     _legend()
     print()
     print(paint("USAGE", PALETTE.violet + PALETTE.bold))
     _entry("code", "ti code INTENT", "ti code add a health endpoint and a test for it",
-           "Plans with qwen3.8:27b-mlx, raised reply and step budgets, and runs under the same "
+           "Runs one action at a time against a scoped set of nine coding tools, under the same "
            "policy gates as ti auto. script and build are aliases.")
     _entry("--dry-run", "ti code --dry-run INTENT", "ti code --dry-run add a login page",
-           "Show the plan and execute nothing.")
+           "Shows the workspace, the tools, the budget and the step-up model, and runs nothing. "
+           "There is no plan to show: each action is decided from the last result.")
     _entry("--keep-models", "ti code --keep-models INTENT", "ti code --keep-models fix the tests",
-           "Leave other models loaded. By default they are unloaded first.")
+           "Leave other models loaded. By default the one being stepped away from is unloaded.")
     _entry("--max-steps", "ti code --max-steps N INTENT", "ti code --max-steps 6 refactor the parser",
            "Raise or lower the step budget (1-10; the default profile uses 8).")
     print()
-    print(paint("MEMORY", PALETTE.violet + PALETTE.bold))
-    print(paint("  A 27B model with a large KV cache does not share memory comfortably with a "
-                "12B model nothing is asking for, and a long keep-alive means the small one "
-                "will not step aside by itself.", PALETTE.muted))
-    print(paint("  So ti code unloads the others first. Nothing reloads them here: the next "
-                "ordinary ti ask loads what it needs, which is when it is wanted.", PALETTE.muted))
+    print(paint("PROVING THE WORK", PALETTE.violet + PALETTE.bold))
+    print(paint("  A job is not finished because files changed. ti code will not conclude while "
+                "changed files are unproven — run the tests, or diagnostics when there are none, "
+                "and a clean result is what releases it.", PALETTE.muted))
+    print(paint("  A clean run goes stale the moment another file changes. The shell may not "
+                "write to source: edit_file and write_file record the change and can undo it.",
+                PALETTE.muted))
     print()
-    print(paint("IF THE MODEL IS MISSING", PALETTE.violet + PALETTE.bold))
-    print(paint("  ti code refuses rather than falling back. Planning a long task with the small "
-                "model is the failure this verb exists to avoid.", PALETTE.muted))
-    print(paint("  ollama pull qwen3.8:27b-mlx   ·   or TACU_CODING_MODEL=your-model ti code …",
+    print(paint("WHICH MODEL", PALETTE.violet + PALETTE.bold))
+    print(paint("  Starts on your default model, because most jobs are ordinary and it is quicker "
+                "and lighter. Steps up to a bigger one when the run shows it is stuck — turns that "
+                "produce nothing, the same call repeated, half the budget spent with nothing "
+                "changed.", PALETTE.muted))
+    print(paint("  Which jobs need the bigger model cannot be told from the wording, so it is "
+                "decided from what the run does, not predicted from the request. It steps up once.",
+                PALETTE.muted))
+    print(paint("  The model stepped away from is unloaded, because a long keep-alive would "
+                "otherwise hold memory the bigger one needs.", PALETTE.muted))
+    print(paint("  ti model use MODEL sets the default  ·  TACU_CODING_MODEL sets the step-up",
                 PALETTE.muted))
     print()
     print(paint("TRY NEXT: ti code --dry-run add a health endpoint   ·   ti auto for host work",
@@ -1248,6 +1257,7 @@ def show_command_help(name: str) -> bool:
 _CHOICE_ROWS = (
     ("ask", "questions", "when you want words — translate, explain, or a pipe. No command runs.", True),
     ("auto", "auto", "when you want TACU to inspect this Mac — CPU, IP, Desktop, apps.", True),
+    ("code", "code", "when the job spans files and commands — build it, then prove it ran.", True),
     ("run", "commands", "when you already know the command — capture stdout and answer -q.", True),
     ("inspect", "inspect", "when you want raw colorized output — no model, no planning.", False),
     ("juicy", "extract", "when you want secrets or identifiers from a dump or tree — extract locally first.", False),
@@ -1379,6 +1389,23 @@ def print_quick_help() -> None:
            "does not add mounts, networks, or capabilities. See ti help docker.", ai=True)
     print()
 
+    _zone("CODING / SCRIPTING")
+    _entry("code", "ti code INTENT   ·   script / build are aliases",
+           "ti code add a health endpoint and a test for it",
+           "Long-horizon work that spans files and commands. Runs one action at a time — "
+           "reads, edits, then runs the tests — instead of planning every step up front, "
+           "so it adapts to what a file actually contains.")
+    _entry("--dry-run", "ti code --dry-run INTENT", "ti code --dry-run add a login page",
+           "Shows the workspace, the tools and the budget, and runs nothing.")
+    _entry("verify", "(always on)", "ti code fix the failing test",
+           "Will not call the job finished while changed files are unproven, and will not let "
+           "the shell write to source when edit_file and write_file can record and undo it.")
+    _entry("models", "(automatic)", "ti code refactor the parser",
+           "Starts on your default model and steps up to a bigger one when a run stalls, "
+           "unloading the smaller one so the memory is free. ti model use MODEL sets the "
+           "default; TACU_CODING_MODEL sets what it steps up to.")
+    print()
+
     _zone("MEMORY / EXPORT")
     _entry("review", "ti review [--list|search TEXT]", "ti review search dns",
            "Browses retained turns so you can find and reuse an older answer. ti history, ti menu, "
@@ -1398,11 +1425,6 @@ def print_quick_help() -> None:
            "Exports an entire retained answer. Omit TURN for the latest response.")
     _entry("clear", "ti clear --yes", "ti clear --yes",
            "Deletes the private retained-turn history only after the explicit --yes confirmation.")
-    _entry("code", "ti code INTENT   ·   script / build are aliases",
-           "ti code add a health endpoint and a test for it",
-           "Long-horizon coding and scripting, planned by a larger local model "
-           "(qwen3.8:27b-mlx). Unloads other models first so the bigger planner has the "
-           "memory, and refuses rather than quietly planning with the small one.")
     _entry("backup", "ti backup create|list|restore …", "ti backup create ~/Dropbox",
            "Packs every database and setting into one portable .tar.gz, and restores it after a crash.")
     _entry("migrate", "ti migrate [DESCRIPTION] [--exclude PATTERN] [--dry-run]",

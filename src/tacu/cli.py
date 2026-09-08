@@ -3771,7 +3771,7 @@ def parser() -> argparse.ArgumentParser:
     auto_parser.add_argument("intent", nargs=argparse.REMAINDER)
     code_parser = command_parser(
         "code",
-        "long-horizon coding and scripting, planned by a larger local model",
+        "long-horizon coding and scripting — one action at a time, proved before it finishes",
         "ti code add a health endpoint and a test for it",
         aliases=["script", "build"],
     )
@@ -3780,7 +3780,7 @@ def parser() -> argparse.ArgumentParser:
     code_parser.add_argument("--max-steps", type=int, default=None,
                              help="maximum commands (defaults to the coding profile)")
     code_parser.add_argument("--dry-run", action="store_true",
-                             help="show the plan and execute nothing")
+                             help="show the workspace, tools and budget, and run nothing")
     code_parser.add_argument("--keep-models", action="store_true",
                              help="leave other loaded models in memory instead of unloading them")
     code_parser.add_argument("intent", nargs=argparse.REMAINDER)
