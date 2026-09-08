@@ -2,6 +2,35 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.5.2] - 2026-09-08
+
+### Added
+
+- **Workspaces are a set, not a setting.** TACU held one configured directory, so
+  running `ti code` inside a project it had not been told about worked somewhere
+  else entirely: asked to run "the flask app in the current directory" it reported
+  the directory empty, because it was reading `~/TACU-Workspace` while the app sat
+  in `~/Downloads/test_http`.
+- Standing in a remembered workspace, or anywhere inside one, is now enough to work
+  there — no prompt, no flag. A nested project wins over the one containing it.
+- Somewhere new that looks like a project, `ti code` asks: add it and use it, use it
+  for this run only, keep the current workspace, or stop. With no terminal to ask, a
+  directory that plainly holds a project is used and the choice is stated.
+- A directory that is not a project — an empty scratch folder, your home, `/tmp` —
+  never captures the workspace. Nothing is written somewhere broad by accident.
+- `ti workspace list` shows the set and marks the one in use and the one you are in.
+  `ti workspace add [PATH]` remembers one, `ti workspace forget [PATH]` drops it
+  without touching the directory, and `ti workspace use` now adds to the set rather
+  than replacing what was there.
+- `ti auto` and `ti do` ask the same question before work that writes files.
+
+### Fixed
+
+- Forgetting the workspace currently in use is refused rather than leaving TACU
+  pointing at a directory it no longer lists.
+- `/tmp` counted as a project because it is a symlink to `/private/tmp` and the
+  check compared unresolved paths.
+
 ## [0.5.1] - 2026-09-08
 
 ### Changed

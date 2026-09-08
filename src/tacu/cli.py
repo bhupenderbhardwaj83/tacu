@@ -3320,6 +3320,63 @@ def _stronger_model() -> str:
 LOOKUP_STEPS = 8
 
 
+def resolve_working_workspace(explicit: Path | None, *, verb: str) -> Path:
+    """Where this job should run, asking when standing somewhere unfamiliar.
+
+    A single configured workspace meant that running `ti code` inside a project
+    TACU had not been told about worked somewhere else entirely — asked about
+    "the flask app in the current directory" it reported the directory empty,
+    because it was reading the configured workspace instead. Standing in a
+    remembered workspace is now enough; standing anywhere else is a question.
+    """
+
+    from . import workspaces
+
+    if explicit is not None:
+        return _intent_workspace(explicit)
+    cwd = Path.cwd().resolve()
+    configured = configured_workspace()
+
+    known = workspaces.containing(cwd)
+    if known is not None:
+        return known                          # already a workspace, or inside one
+    if configured is None:
+        return _intent_workspace(None)
+    if cwd == configured.expanduser().resolve():
+        return cwd
+    if not workspaces.looks_like_a_project(cwd):
+        return _intent_workspace(None)        # a home or a scratch directory: leave it
+
+    print()
+    print(paint("THIS DIRECTORY IS NOT A TACU WORKSPACE", PALETTE.yellow + PALETTE.bold))
+    print(paint(f"  you are here      {cwd}", PALETTE.text))
+    print(paint(f"  TACU workspace    {configured}", PALETTE.muted))
+    print(paint(f"  ti {verb} writes into the workspace, so it would not run where you are.",
+                PALETTE.text))
+    if not sys.stdin.isatty():
+        # Nobody to ask. A directory that plainly holds a project is where the
+        # user meant, and saying which one was chosen costs nothing.
+        print(paint(f"Not a terminal — using {cwd} because it looks like a project. "
+                    f"Pass --workspace to choose.", PALETTE.muted))
+        return cwd
+    while True:
+        answer = input("[a] add this directory and use it  [t] use it for this run only  "
+                       "[k] keep the workspace  [q] stop > ").strip().casefold()
+        if answer in {"a", "add", "y", "yes"}:
+            saved = workspaces.remember(cwd)
+            print(paint(f"Remembered. TACU workspaces: "
+                        f"{', '.join(str(item) for item in workspaces.remembered())}",
+                        PALETTE.green))
+            return saved
+        if answer in {"t", "this", "once", "here"}:
+            return cwd
+        if answer in {"k", "keep"}:
+            return configured.expanduser().resolve()
+        if answer in {"q", "quit", "abort", "n", "no"}:
+            raise TacuError("Stopped. Nothing was run.")
+        print("Choose a, t, k, or q.")
+
+
 def handle_coding_command(arguments: argparse.Namespace, client: ModelProvider) -> int:
     """Run one coding job as a step-at-a-time loop rather than a batch plan."""
 
@@ -3329,7 +3386,7 @@ def handle_coding_command(arguments: argparse.Namespace, client: ModelProvider) 
     intent = _intent_text(arguments.intent)
     if not intent:
         raise TacuError("ti code needs a goal. Example: ti code add a health endpoint and a test")
-    workspace = _intent_workspace(arguments.workspace)
+    workspace = resolve_working_workspace(arguments.workspace, verb="code")
 
     def dispatch(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         context = ToolContext(workspace, app_home(), approve_dangerous=True)
@@ -3419,6 +3476,11 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
     autonomous = arguments.subcommand == "auto"
     intent = _intent_text(arguments.intent)
     workspace = _intent_workspace(arguments.workspace)
+    if intent_mutates_workspace(intent) or extract_file_write(intent):
+        # The same question as the coding lane: work that writes should write
+        # where the user is standing, not somewhere they have forgotten about.
+        arguments.workspace = resolve_working_workspace(
+            arguments.workspace, verb=arguments.subcommand or "auto")
     piped = _piped_evidence(arguments)
     if piped is not None and _pipe_is_the_subject(intent):
         # The data was handed in; read it rather than going to look for other data.
@@ -4068,6 +4130,14 @@ def parser() -> argparse.ArgumentParser:
     workspace_create = workspace_sub.add_parser("create", help="create and select a workspace")
     workspace_create.add_argument("path", nargs="?", type=Path, help="omit for a guided prompt")
     workspace_create.add_argument("--no-enter", action="store_true", help=argparse.SUPPRESS)
+    workspace_sub.add_parser("list", aliases=["ls"], help="show every remembered workspace")
+    workspace_add = workspace_sub.add_parser("add", help="remember a directory as a workspace")
+    workspace_add.add_argument("path", nargs="?", type=Path,
+                               help="directory to remember; defaults to here")
+    workspace_forget = workspace_sub.add_parser("forget", aliases=["remove"],
+                                                help="stop remembering a workspace")
+    workspace_forget.add_argument("path", nargs="?", type=Path,
+                                  help="directory to forget; defaults to here")
     workspace_use = workspace_sub.add_parser("use", help="select an existing directory")
     workspace_use.add_argument("path", nargs="?", type=Path, help="omit for a guided prompt")
     workspace_use.add_argument("--no-enter", action="store_true", help=argparse.SUPPRESS)
@@ -4801,6 +4871,46 @@ def _main(argv: list[str] | None = None) -> int:
                 return 0 if configured_workspace() else 1
             if arguments.workspace_action in {"enter", "go", "open"}:
                 return _enter_workspace()
+            if arguments.workspace_action in {"list", "ls"}:
+                from . import workspaces as workspace_registry
+
+                known = workspace_registry.remembered()
+                if not known:
+                    print("No workspaces remembered. Run: ti workspace add")
+                    return 1
+                current = configured_workspace()
+                here = Path.cwd().resolve()
+                for item in known:
+                    marks = []
+                    if current is not None and item == current.expanduser().resolve():
+                        marks.append("in use")
+                    if item == here:
+                        marks.append("you are here")
+                    suffix = f"   ({', '.join(marks)})" if marks else ""
+                    print(f"{'▸' if marks else ' '} {item}{suffix}")
+                return 0
+            if arguments.workspace_action == "add":
+                from . import workspaces as workspace_registry
+
+                target = (arguments.path or Path.cwd()).expanduser()
+                saved = workspace_registry.remember(target)
+                print(f"Remembered and now in use: {saved}")
+                return 0
+            if arguments.workspace_action in {"forget", "remove"}:
+                from . import workspaces as workspace_registry
+
+                target = (arguments.path or Path.cwd()).expanduser()
+                try:
+                    dropped = workspace_registry.forget(target)
+                except workspace_registry.InUse:
+                    raise TacuError(
+                        f"{target.resolve()} is the workspace in use. Switch to another "
+                        f"first: ti workspace use OTHER") from None
+                if dropped:
+                    print(f"Forgotten: {target.resolve()}  (the directory itself is untouched)")
+                    return 0
+                print(f"Not a remembered workspace: {target.resolve()}")
+                return 1
             path = arguments.path or _workspace_input(arguments.workspace_action)
             path = path.expanduser()
             if arguments.workspace_action == "use" and not path.is_dir() and not path.is_absolute():
@@ -4809,7 +4919,9 @@ def _main(argv: list[str] | None = None) -> int:
                     path = home_candidate
             if arguments.workspace_action == "use" and not path.is_dir():
                 raise TacuError(f"Workspace does not exist: {path}. Run ticu workspace for the guided menu.")
-            print(f"Workspace ready: {save_workspace(path)}")
+            from . import workspaces as workspace_registry
+
+            print(f"Workspace ready: {workspace_registry.remember(path)}")
             return 0 if arguments.no_enter else _offer_workspace_shell()
         if arguments.subcommand == "setup":
             chosen = Path.cwd() if arguments.use_current else arguments.workspace

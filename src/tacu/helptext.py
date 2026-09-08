@@ -1400,6 +1400,10 @@ def print_quick_help() -> None:
     _entry("verify", "(always on)", "ti code fix the failing test",
            "Will not call the job finished while changed files are unproven, and will not let "
            "the shell write to source when edit_file and write_file can record and undo it.")
+    _entry("where", "(automatic)", "cd ~/projects/api && ti code fix the login test",
+           "Runs where you are standing when that is a remembered workspace. Somewhere new "
+           "that looks like a project, it asks whether to add it. ti workspace list shows the "
+           "set; ti workspace add remembers one.")
     _entry("models", "(automatic)", "ti code refactor the parser",
            "Starts on your default model and steps up to a bigger one when a run stalls, "
            "unloading the smaller one so the memory is free. ti model use MODEL sets the "
