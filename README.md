@@ -135,6 +135,7 @@ Hardware floor: **16 GB RAM** (32 GB preferred), **40 GB** free disk on first in
 | A host fact, file CRUD, search, tests — native tools | `ti auto …` |
 | To **see** the plan and approve every step (shell fallback allowed) | `ti do …` |
 | Language, explanation, “how do I…” | `ti ask …` |
+| Work spanning several files and commands — build it, then prove it ran | `ti code …` |
 | You already know the argv | `ti run -q QUESTION -- command` or `ti inspect -- command` |
 | A huge file (CSV / PCAP / Burp / hive) | `ti data load FILE` then `ti data ask NAME …` |
 | Local web search | `ti web QUERY` (starts TACU's `tacu-searxng` on `127.0.0.1:8080`, or the next free port) |
@@ -145,6 +146,7 @@ Hardware floor: **16 GB RAM** (32 GB preferred), **40 GB** free disk on first in
 ti auto which process is consuming most CPU
 ti do please generate a shell script that scans open TCP ports and save it as sc.sh
 ti ask explain split-horizon DNS
+ti code add a /health endpoint to app.py and a test that proves it returns 200
 ifconfig | ti ask which interface has my LAN address?
 ```
 
@@ -234,18 +236,78 @@ still refuses invented shell.
 
 ## Everyday loop
 
+### 1 · Find your way
+
 ```sh
-ticu                          # interactive prompt
-ti help                       # mind-map of commands
-ti auto --dry-run INTENT      # plan only
-ti copy                       # latest answer → clipboard (same as ti copy last)
-ti review                     # browse retained turns (max 100)
-ticu doctor                   # model, Docker, workspace, PATH
+ti help              # every command, grouped — start here
+ti help code         # one command in depth
+ti data --help       # identical page; --help and `ti help NAME` are the same
 ```
+
+Every per-command page has the same three parts: the **syntax**, a **worked example**
+you can paste, and a plain description of what it does and when to reach for it.
+So `ti juicy --help` tells you what a scan finds and how to narrow it, without
+needing this README open.
+
+### 2 · Do the work
+
+Four verbs, differing in how much they are allowed to do. ([Which command?](#which-command) is the full table.)
+
+```sh
+ti ask explain why my TLS handshake fails with SNI mismatch     # words only, nothing runs
+ti auto which process is eating the most RAM                    # TACU looks, pausing at gates
+ti do stop the container named api                              # you approve each step
+ti code fix the failing login test and prove it passes          # reads, edits, runs the tests
+```
+
+`ti code` is the long-horizon lane: it works one action at a time — read the file,
+make the edit, run the tests — instead of planning every step before it has seen
+anything, and **it will not call the job finished while your changes are unproven.**
+It runs where you are standing when that directory is a known workspace, and asks
+before adopting a new one.
+
+```sh
+cd ~/projects/api
+ti code add a /health endpoint and a test for it     # asks to add this directory the first time
+ti workspace list                                    # the projects TACU remembers
+```
+
+### 3 · Find what should not be there
+
+```sh
+ti juicy ~/projects/api           # hardcoded secrets, keys, tokens and PII across a tree
+ti juicy dump.log --kind password,secret
+ti juicy --help                   # what it looks for, and how to narrow it
+```
+
+Reports land beside the scan as `_Juicy_<Project>_DD_MMM_YYYY_HHMM_IST.csv`, one per
+project, plus a rotation report that groups the same secret wherever it appears.
+
+### 4 · Keep what you found
+
+```sh
+ti review                    # browse retained answers (max 100)
+ti review search dns         # find the one you mean
+ti copy 42:3                 # line 3 of turn 42 → clipboard
+ti save 42 --format md       # the whole answer to a file
+ti clip add "kubectl -n prod logs -f deploy/api"   # a numbered tray, kept across sessions
+ti clip 2                    # put #2 back on the clipboard
+```
+
+`ti review` is the record of what TACU told you; `ti clip` is the scratchpad you fill
+yourself, from an answer or by hand.
+
+### Session keys
 
 After an answer: `[c] copy` `[s] md` `[j] json` `[t] txt`. Turn ids are yellow.
 
-Long output pauses after 20 lines (Enter = one line, Space = a page, `q` = stop). `TACU_NO_PAGER=1` prints everything.
+Long output pauses after 20 lines (Enter = one line, Space = a page, `q` = stop).
+`TACU_NO_PAGER=1` prints everything.
+
+```sh
+ticu            # interactive prompt
+ticu doctor     # model, Docker, workspace, PATH
+```
 
 ---
 

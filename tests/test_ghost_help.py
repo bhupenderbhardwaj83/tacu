@@ -187,3 +187,62 @@ class CodingSectionTests(unittest.TestCase):
         self.assertNotIn("refuses rather than", page)
         self.assertIn("one action at a time", page)
 
+class ReadmeTests(unittest.TestCase):
+    """The README shows commands to paste. They have to exist."""
+
+    def readme(self) -> str:
+        return (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+
+    def test_every_verb_the_everyday_loop_shows_is_real(self) -> None:
+        import re
+
+        from tacu.cli import parser
+
+        body = self.readme()
+        section = body.split("## Everyday loop", 1)[1].split("\n## ", 1)[0]
+        verbs = {match.group(1) for match in
+                 re.finditer(r"^(?:ti|ticu) ([a-z-]+)", section, re.MULTILINE)}
+        # argparse is the truth about what exists, including aliases and `help`.
+        root = parser()
+        known = {"help"}
+        for action in (root._subparsers._group_actions if root._subparsers else []):
+            known |= set(action.choices)
+            break
+        self.assertTrue(verbs, "the section should show commands")
+        self.assertEqual(verbs - known, set(), "README names commands TACU does not have")
+
+    def test_the_long_horizon_lane_is_documented(self) -> None:
+        body = self.readme()
+        # ti code was absent from the README entirely while being its headline lane.
+        self.assertIn("ti code", body)
+        self.assertIn("`ti code …`", body, "it belongs in the Which command? table")
+
+    def test_the_juicy_report_name_matches_what_is_written(self) -> None:
+        from datetime import datetime, timezone
+
+        from tacu.juicyscan import report_basename, report_stamp
+
+        moment = datetime(2026, 9, 8, 8, 15, tzinfo=timezone.utc)
+        produced = report_basename("Project", report_stamp(moment))
+        self.assertTrue(produced.startswith("_Juicy_Project_"), produced)
+        self.assertTrue(produced.endswith("_IST"), produced)
+        self.assertIn("_Juicy_<Project>_DD_MMM_YYYY_HHMM_IST", self.readme())
+
+    def test_help_name_and_double_dash_help_are_the_same_page(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from tacu import cli
+        from tacu.theme import strip_ansi
+
+        pages = []
+        for argv in (["help", "data"], ["data", "--help"]):
+            shown = StringIO()
+            with redirect_stdout(shown):
+                try:
+                    cli.main(argv)
+                except SystemExit:
+                    pass
+            pages.append(strip_ansi(shown.getvalue()))
+        self.assertEqual(pages[0], pages[1], "the README says these are identical")
+

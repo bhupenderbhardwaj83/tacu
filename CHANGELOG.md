@@ -2,6 +2,21 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.5.3] - 2026-09-08
+
+### Changed
+
+- `ti code` is in the README. The long-horizon lane did not appear anywhere in it —
+  not in the command table, not in the examples — while being the headline feature.
+- **Everyday loop** is rewritten around how a session actually goes: find your way,
+  do the work, find what should not be there, keep what you found. It shows
+  `ti help NAME` and `NAME --help` as the same page, what a per-command page
+  contains, and where `ti juicy` puts its reports; it no longer restates the
+  "Which command?" table, and links to it instead.
+- Every command shown in that section is now checked against argparse by a test, so
+  the README cannot drift into naming a command TACU does not have. The report-name
+  format written there is checked against the code that generates it.
+
 ## [0.5.2] - 2026-09-08
 
 ### Added
