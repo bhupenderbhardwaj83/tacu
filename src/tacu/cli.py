@@ -27,6 +27,7 @@ from . import __version__
 from .answer_format import (
     CopySpec, copyable_body, normalize_answer_for_storage, numbered_display_lines,
     parse_block_spec, parse_copy_target, resolve_copy_text, strip_decorative_markup,
+    strip_tool_call_syntax,
 )
 from .artifacts import RawArtifactWriter
 from .clipboard import CLIP_LIMIT, ClipItem, ClipStore, origin_line, preview_line
@@ -41,7 +42,7 @@ from .automation import (
 )
 from . import acceptance, diagnose
 from dataclasses import replace
-from .companion import exact_answer, exact_host_answer
+from .companion import _recipes_used, exact_answer, exact_host_answer
 from .loop import (
     MAX_AI_TURNS, MAX_COGNITIVE_TURNS, answer_language_drifted, answer_needs_refine,
     is_language_fast_path, is_language_question, merge_results,
@@ -54,7 +55,8 @@ from .routing import (
     CAPABILITIES,
     HOST_MUTATE_KEYS, capability_risk, directory_target_from_intent, extract_file_write,
     intent_mutates_workspace,
-    is_shell_cd_intent, intent_host_domain, intent_is_explanatory, intent_wants_host_mutate,
+    is_shell_cd_intent, intent_asks_how_to, intent_host_domain, intent_is_explanatory,
+    intent_wants_a_command, intent_wants_host_mutate,
     native_steps_for_intent,
 )
 from .completion import completion_script, shell_initialization
@@ -3296,6 +3298,22 @@ def _inspectable_words() -> frozenset[str]:
     return frozenset(words) - _ACTION_WORDS
 
 
+def _names_something_inspectable(query: str) -> bool:
+    """Does this question name a subject a tool can go and look at?
+
+    Compared with the same plural allowance the process matcher uses, because
+    two notions of "the same word" in one codebase is one too many: the
+    capability table lists `connection`, and `"connections"` missed it exactly
+    as `"servers"` once missed `server`.
+    """
+
+    from .procgraph import same_word
+
+    vocabulary = _inspectable_words()
+    return any(any(same_word(word, known) for known in vocabulary)
+               for word in re.split(r"\W+", query.casefold()) if len(word) > 2)
+
+
 def _looks_up_facts(query: str) -> bool:
     """Is this a question about this machine or this codebase, rather than language?
 
@@ -3310,15 +3328,27 @@ def _looks_up_facts(query: str) -> bool:
     someone happened to use to ask about it.
     """
 
-    if not query or intent_is_explanatory(query) or is_language_question(query):
+    if not query or is_language_question(query) or _COMPOSES.match(query):
         return False
-    if _COMPOSES.match(query):
+    if intent_wants_a_command(query) and not intent_asks_how_to(query):
+        # "top 10 OS commands for process related forensics" is general
+        # knowledge. Reaching for a tool answered it with a forensics sweep,
+        # and then, once that was stopped, by grepping TACU's own test files.
+        # Asking *how to see something here* is different: that names a real
+        # subject and is handled below.
+        return False
+    if intent_is_explanatory(query) and not intent_asks_how_to(query):
+        # "explain RAM versus disk" is a lesson. "how can I see process 37359"
+        # is a question about this machine that happens to ask for the method,
+        # and refusing to look answered it from nothing: a start time and a
+        # memory figure that had never been read.
+        return False
+    if intent_asks_how_to(query) and not _names_something_inspectable(query):
         return False
     if re.search(r"(?i)\b(?:is|are|was|were|do|does|did|how many|how much|which|what|where|"
                  r"list|show|find|count|any)\b", query):
         return True
-    return bool({word for word in re.split(r"\W+", query.casefold()) if word}
-                & _inspectable_words())
+    return _names_something_inspectable(query)
 
 
 def _answer_by_looking(query: str, client: ModelProvider, arguments: argparse.Namespace,
@@ -3343,9 +3373,16 @@ def _answer_by_looking(query: str, client: ModelProvider, arguments: argparse.Na
         # better than a callback that could quietly start agreeing to things.
         return False
 
+    # The exact commands the lookup actually ran, kept so the answer can say how
+    # to repeat it. Asking the model to quote them did not work: it kept naming
+    # the TACU call instead, and prompt wording is not a mechanism.
+    ran: list[dict[str, Any]] = []
+
     def dispatch(name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return dispatch_tool(name, payload, workspace, app_home(), invoke_tool, refuse,
-                             surface=coding_module.ANSWER_TOOL_SURFACE, lane="ti ask")
+        result = dispatch_tool(name, payload, workspace, app_home(), invoke_tool, refuse,
+                               surface=coding_module.ANSWER_TOOL_SURFACE, lane="ti ask")
+        ran.append({"result": {"data": result}})
+        return result
 
     def announce(kind: str, message: str) -> None:
         if kind == "call":
@@ -3371,7 +3408,12 @@ def _answer_by_looking(query: str, client: ModelProvider, arguments: argparse.Na
                 f"and nothing conclusive came back. Try naming the directory or file "
                 f"you mean, or run: ti code {query}")
     else:
-        body = outcome.answer.strip()
+        body = strip_tool_call_syntax(
+            outcome.answer.strip(), frozenset(coding_module.ANSWER_TOOL_SURFACE))
+        recipes = _recipes_used(ran)
+        if recipes:
+            body += "\n\nRead the same thing yourself with:\n" + "\n".join(
+                f"  {command}" for command in recipes[:3])
     response = normalize_answer_for_storage(body)
     print(render_answer(response, query=query))
     store.add(model=f"{client.model}/looked", query=query, response=response, tool_result=None)
@@ -3732,6 +3774,14 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
         else MAX_AUTONOMOUS_STEPS
     if not 1 <= arguments.max_steps <= step_ceiling:
         raise TacuError(f"--max-steps must be between 1 and {step_ceiling}.")
+    # A question about commands is answered with commands. Planning a capability
+    # for it produced a list of processes in reply to "top 10 OS commands for
+    # process related forensics".
+    if intent_wants_a_command(intent):
+        with HistoryStore(app_home() / "history.db") as store:
+            ask(store=store, client=client, query=intent, tool_result=None,
+                stream=not arguments.no_stream, context_turns=0)
+        return 0
     if is_language_fast_path(intent):
         with HistoryStore(app_home() / "history.db") as store:
             ask(store=store, client=client, query=intent, tool_result=None,
@@ -5361,6 +5411,7 @@ def _main(argv: list[str] | None = None) -> int:
                 # machine instead, which is how a piped nmap scan was answered
                 # with the local listening ports.
                 if (query and evidence is None and not intent_is_explanatory(query)
+                        and not intent_wants_a_command(query)
                         and native_steps_for_intent(query)
                         and not exact_answer(query, evidence)):
                     arguments.subcommand = "auto"

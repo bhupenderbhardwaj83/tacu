@@ -992,14 +992,42 @@ class ThinkingBudgetTests(unittest.TestCase):
         options = json.loads(opened.call_args_list[0].args[0].data)["options"]
         self.assertGreater(options["repeat_penalty"], 1.0)
 
+    def test_a_reasoning_only_reply_is_asked_again_for_the_answer(self) -> None:
+        # A clean reply with empty content is sometimes the Gemma MLX quirk, where
+        # `thinking` holds the answer, and sometimes a scratchpad that ends "I will
+        # call network_tools.list_active_connections()" and never does. The words
+        # cannot tell them apart, and printing the second lost the user's trust —
+        # so ask once for the answer itself. One extra generation is the price.
+        scratchpad = ("The user wants to know about connections. I should look for a tool. "
+                      "I will call network_tools.list_active_connections().")
+        responses = [self._Stream(self._thinking(scratchpad, "stop")),
+                     self._Stream(self._answer("One connection to 140.82.114.25:443."))]
+        client = self._client(budget="1024")
+        with patch("tacu.providers.urllib.request.urlopen", side_effect=responses) as opened:
+            text = "".join(client.chat([{"role": "user", "content": "hi"}], stream=True))
+        self.assertEqual(opened.call_count, 2)
+        self.assertIn("140.82.114.25:443", text)
+        self.assertNotIn("I will call", text, "the scratchpad must never reach the user")
+
+    def test_the_retry_asks_for_the_answer_rather_than_the_reasoning(self) -> None:
+        responses = [self._Stream(self._thinking("Thinking about it.", "stop")),
+                     self._Stream(self._answer("Done."))]
+        client = self._client(budget="1024")
+        with patch("tacu.providers.urllib.request.urlopen", side_effect=responses) as opened:
+            "".join(client.chat([{"role": "user", "content": "hi"}], stream=True))
+        sent = json.loads(opened.call_args_list[1].args[0].data)["messages"]
+        self.assertIn("Answer the question directly", sent[-1]["content"])
+
     def test_completed_reply_still_falls_back_to_thinking(self) -> None:
-        # The Gemma MLX quirk this fallback exists for: finished cleanly, empty content.
-        responses = [self._Stream(self._thinking("Run pwd to see the directory.", "stop"))]
+        # The Gemma MLX quirk this fallback exists for: when the retry also comes
+        # back with reasoning only, that text is still better than nothing.
+        responses = [self._Stream(self._thinking("Run pwd to see the directory.", "stop")),
+                     self._Stream(self._thinking("Run pwd to see the directory.", "stop"))]
         client = self._client(budget="1024")
         with patch("tacu.providers.urllib.request.urlopen", side_effect=responses) as opened:
             text = "".join(client.chat([{"role": "user", "content": "hi"}], stream=True))
         self.assertIn("Run pwd", text)
-        self.assertEqual(opened.call_count, 1, "a clean reply must not be retried")
+        self.assertEqual(opened.call_count, 2)
 
     def test_content_is_preferred_and_never_retried(self) -> None:
         responses = [self._Stream(self._answer("Your shell is in /Users/me."))]

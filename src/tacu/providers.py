@@ -105,6 +105,16 @@ class OllamaProvider:
             # mid-thought; or the answer itself was cut off partway — "there are 31
             # files" followed by twenty of them. Neither is an answer, so widen the
             # budget and ask again rather than presenting half a list as complete.
+            if outcome.get("answered_from_thinking") and not final:
+                # Reasoning is not an answer. Ask once more for the answer itself
+                # rather than printing the scratchpad and calling it a reply.
+                messages = list(messages) + [{
+                    "role": "user",
+                    "content": ("Answer the question directly now. Give the answer itself, "
+                                "not your reasoning about how to find it, and do not "
+                                "describe tools you are going to call."),
+                }]
+                continue
             if not outcome.get("spent_budget_thinking") and not outcome.get("truncated"):
                 return
             if final:
@@ -227,8 +237,18 @@ class OllamaProvider:
                         # Cut off mid-thought: the reasoning is unfinished, not an answer.
                         record["spent_budget_thinking"] = True
                         return
-                    # Finished normally with an empty `content` — the Gemma MLX quirk
-                    # this fallback exists for, where `thinking` holds the real answer.
+                    # Finished normally with an empty `content`. Sometimes that is
+                    # the Gemma MLX quirk this fallback exists for and `thinking`
+                    # holds the answer; sometimes it is a scratchpad that ends
+                    # "I will call network_tools.list_active_connections()" and
+                    # never does. Which one it is cannot be told from the words —
+                    # only from the fact that it arrived on the reasoning channel,
+                    # so record that and let the caller decide.
+                    record["answered_from_thinking"] = True
+                    if can_retry:
+                        # Hold it. Text already handed to the caller cannot be
+                        # taken back, and the retry exists to replace this.
+                        return
                     yield "".join(thinking_bits)
                 return
             with response:
@@ -242,8 +262,11 @@ class OllamaProvider:
                         return
                 yield content.strip()
             elif thinking.strip():
+                record["answered_from_thinking"] = True
                 if event.get("done_reason") == "length":
                     record["spent_budget_thinking"] = True
+                    return
+                if can_retry:
                     return
                 yield thinking.strip()
         except urllib.error.HTTPError as error:

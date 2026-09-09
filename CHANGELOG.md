@@ -2,6 +2,35 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.6.1] - 2026-09-09
+
+### Fixed
+
+- Reasoning is no longer printed as an answer. A reply that arrives with an
+  empty `content` and a full `thinking` is sometimes the answer and sometimes a
+  scratchpad ending "I will call network_tools.list_active_connections()" that
+  never does; the words cannot tell them apart, so the reply is held back and
+  the model is asked once for the answer itself. If that also comes back as
+  reasoning, it is still shown rather than nothing.
+- A number inside an address, a version or a date is no longer read as a port.
+  "outbound connections with the host 140.82.114.25" was planned as a question
+  about port 140, because a bare-number fallback matched the first octet.
+- An IPv4 address is no longer read as a filename. The same question planned
+  `read_file("140.82.114.25")`, which failed and took the run with it.
+- A question about commands is answered with commands. "top 10 OS commands for
+  process related forensics" ran a forensics sweep and reported its findings;
+  "all processes related native os commands for mac" returned the highest-CPU
+  process. Neither reaches a native capability or the lookup loop now.
+- Asking how to see something on this machine is answered by looking at it.
+  These were classed as lessons and answered with no tool call at all, so the
+  reply carried a start time and a memory figure that had never been read.
+- Host answers say which OS command produced them, so "how can I look at this
+  myself" is answered before it is asked. TACU already recorded `ps -Ao …` and
+  `lsof -nP -iTCP …` and never showed them.
+- TACU's own call shape is removed from answers. `process(operation='inspect',
+  pid=1)` offered as something to run is worse than nothing: it looks like a
+  command and typing it does nothing.
+
 ## [0.6.0] - 2026-09-09
 
 ### Changed

@@ -277,6 +277,47 @@ _EXPLANATORY = re.compile(
 )
 
 
+# Asking *how* to do something on this machine is not the same as asking what a
+# thing is. "explain RAM versus disk" wants a lesson; "how can I see process 37359"
+# wants this machine's answer and the command that produced it. Treating both as
+# lessons meant the second was answered with no tool call at all — the model
+# reported a start time and a memory figure it had never read.
+_ASKS_HOW_TO = re.compile(
+    r"(?i)\b(?:how (?:can|do|would|should) i|how to|what is the way to|"
+    r"tell me how (?:to|i)|let me know how (?:to|i)|show me how (?:to|i))\b")
+
+# A question whose answer is a command rather than data. Naming the kind of
+# answer wanted is a small and stable set; naming the ways a question might be
+# phrased is not, which is why "tell me top 10 OS commands for process related
+# forensics" ran a forensics sweep and reported findings instead.
+_WANTS_A_COMMAND = re.compile(
+    r"(?i)(?:"
+    r"\b(?:which|what|any|the|some|list of|top\s+\d+)\s+(?:\w+\s+){0,3}"
+    r"(?:command|commands|cli|utility|utilities|syntax|flag|flags|option|options)\b"
+    r"|\b(?:command|commands|syntax)\s+(?:to|for|that)\b"
+    r"|\bnative\s+(?:os\s+)?commands?\b"
+    r"|\bos\s+commands?\b"
+    r"|\b(?:myself|manually|by hand|on my own)\b"
+    r")")
+
+
+def intent_asks_how_to(intent: str) -> bool:
+    """True when the question asks for a method, not only for the answer."""
+
+    return bool(_ASKS_HOW_TO.search(intent or ""))
+
+
+def intent_wants_a_command(intent: str) -> bool:
+    """True when what is wanted is a command to run, not this machine's data.
+
+    A native capability answers "what is running"; it cannot answer "which
+    command shows me what is running", and running one anyway produced a list of
+    processes in reply to a question about commands.
+    """
+
+    return bool(_WANTS_A_COMMAND.search(intent or ""))
+
+
 def intent_is_explanatory(intent: str) -> bool:
     """True when the question asks what something *is*, not what this machine holds.
 
@@ -1241,8 +1282,39 @@ def _host_from_intent(intent: str) -> str | None:
     return match.group(1) if match else None
 
 
+# Digits that belong to something else. An address, a version and a date all
+# contain numbers in port range, and a bare number is only a port when nothing
+# in the sentence has already claimed it.
+_NUMBER_IN_A_LARGER_THING = re.compile(
+    r"(?:(?:\d{1,3}\.){3}\d{1,3}"                    # 140.82.114.25
+    r"|\b[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,}\b"        # fe80::1
+    r"|\b\d+(?:\.\d+){1,}\b"                         # 3.14.7
+    r"|\b\d{4}-\d{2}-\d{2}\b"                        # 2026-09-09
+    r")", re.I)
+_PORT_CONTEXT = re.compile(
+    r"(?i)\b(?:port|ports|listening|listen|bound|binding|serving|serves|localhost|"
+    r"tcp|udp|lsof|netstat|socket|sockets|127\.0\.0\.1|:\d)")
+
+
 def _port_from_intent(intent: str) -> int | None:
-    match = re.search(r"\bport\s+(\d{2,5})\b", intent.casefold()) or re.search(r"\b(\d{2,5})\b", intent)
+    """The port a question names, and nothing that merely looks like one.
+
+    `140.82.114.25` gave `port=140`: the bare-number fallback matched the first
+    octet, and the question about connections to that host was answered as a
+    question about port 140. A number is a port when the sentence says so, or
+    when it stands alone in a sentence that is about ports at all.
+    """
+
+    said = re.search(r"\bport\s+(\d{1,5})\b", intent.casefold())
+    if said:
+        value = int(said.group(1))
+        return value if 1 <= value <= 65535 else None
+    # Blank out addresses, versions and dates so their digits cannot be read as
+    # a port, and only then consider a bare number.
+    masked = _NUMBER_IN_A_LARGER_THING.sub(" ", intent)
+    if not _PORT_CONTEXT.search(masked):
+        return None
+    match = re.search(r"\b(\d{2,5})\b", masked)
     if not match:
         return None
     value = int(match.group(1))
@@ -1577,9 +1649,17 @@ _ADDRESS_SUFFIXES = frozenset((
 ))
 
 
+_IPV4_SHAPED = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+
+
 def _looks_like_a_domain(value: str) -> bool:
     if "/" in value:
         return False
+    if _IPV4_SHAPED.match(value):
+        # 140.82.114.25 has the shape of a filename and is not one. Reading it as
+        # a path turned a question about connections to that host into
+        # read_file("140.82.114.25"), which failed and took the run with it.
+        return True
     suffix = value.rsplit(".", 1)[-1].casefold()
     return suffix in _ADDRESS_SUFFIXES
 

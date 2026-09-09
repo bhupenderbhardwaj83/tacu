@@ -1007,6 +1007,30 @@ def _forensic_answer(data: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
+def _recipes_used(results: list[dict[str, Any]]) -> list[str]:
+    """The actual OS commands behind an answer, in the order they were run.
+
+    TACU already records these — `ps -Ao …`, `lsof -nP -iTCP` — and never showed
+    them, so "how can I look at this myself" needed three more questions to get
+    an answer TACU held all along. Saying what was run also makes the answer
+    checkable, which is worth more than the convenience.
+    """
+
+    import shlex
+
+    seen: list[str] = []
+    for item in results:
+        recipe = ((item.get("result") or {}).get("data") or {}).get("recipe")
+        if isinstance(recipe, str):
+            recipe = [recipe]
+        if not isinstance(recipe, list) or not recipe:
+            continue
+        rendered = " ".join(shlex.quote(str(part)) for part in recipe)
+        if rendered not in seen:
+            seen.append(rendered)
+    return seen
+
+
 def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | None:
     """Answer a host-ops intent from native tool results without a model call."""
 
@@ -1102,8 +1126,15 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
     # Compared by identity, not by content: one result can land in two buckets —
     # operation "inspect" is both a process lookup and a Docker one — and a
     # record must never count as the other tool that found something.
+    # "Widened" means the words did not match and a broader view was returned in
+    # place of an answer. That is not a match, so it must not out-rank a tool
+    # that did match: "what is my primary ip address" plans network.interfaces
+    # and a process.graph on "primary ip address", and once the graph learned to
+    # widen instead of returning nothing, the widened list started speaking
+    # first — the same fault as before, wearing results.
     blank = {id(data) for data in process_data
-             if not data.get("processes") and data.get("open_files") is None}
+             if (not data.get("processes") and data.get("open_files") is None)
+             or data.get("widened")}
     if blank and any(id(data) not in blank
                      for bucket in (network_data, app_data, ollama_data, system_data,
                                     docker_data, git_data, file_data, service_data,
@@ -1498,6 +1529,12 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
             continue
         collapsed.append(line)
     text = "\n".join(collapsed)
+    # Say what was actually run. It makes the answer checkable, and it answers
+    # "how can I look at this myself" without a second round trip.
+    recipes = _recipes_used(results)
+    if recipes:
+        text += "\n\nRead the same thing yourself with:\n" + "\n".join(
+            f"  {command}" for command in recipes[:3])
     if docker_data or ollama_data or git_data:
         return text
     if "Next:" not in text:

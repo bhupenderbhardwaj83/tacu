@@ -53,6 +53,60 @@ def strip_leaked_reasoning(text: str) -> str:
     return content[match.start():].strip()
 
 
+# `process(operation='inspect', pid=1)` is TACU's own call shape. Offered to
+# someone who asked how to look at a process it is worse than nothing: it looks
+# like a command, and typing it does nothing. The model was told not to write
+# these and wrote them anyway, so they are removed here instead — the real OS
+# command is appended separately.
+_TOOL_CALL_LINE = re.compile(
+    r"(?im)^\s*(?:[-*]\s*|`{1,3})?\b[a-z_][a-z0-9_]{2,}\(\s*[a-z_][a-z0-9_]*\s*=[^\n]*$")
+_LEADS_INTO_A_COMMAND = re.compile(
+    r"(?i)(?:run|use|command|yourself|following|call)[^\n]*:\s*$")
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _names_a_tool_call(fragment: str, tools: frozenset[str]) -> bool:
+    for match in re.finditer(r"\b([a-z_][a-z0-9_]{2,})\(\s*[a-z_][a-z0-9_]*\s*=", fragment):
+        if match.group(1) in tools:
+            return True
+    return False
+
+
+def strip_tool_call_syntax(text: str, tools: frozenset[str]) -> str:
+    """Remove TACU's own call shape wherever it is offered as if it were a command.
+
+    Taken out sentence by sentence rather than line by line: "There are 3
+    servers. I used process(operation='graph')." should keep its first half.
+    """
+
+    kept: list[str] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip().strip("-*` ")
+        if (_TOOL_CALL_LINE.match(line)
+                and stripped.split("(", 1)[0].strip() in tools):
+            # A whole line of it: drop the sentence that introduced it too, so
+            # no colon is left dangling over nothing.
+            while kept and not kept[-1].strip():
+                kept.pop()
+            if kept and _LEADS_INTO_A_COMMAND.search(kept[-1]):
+                kept.pop()
+            continue
+        if _names_a_tool_call(line, tools):
+            surviving = [part for part in _SENTENCE_SPLIT.split(line)
+                         if not _names_a_tool_call(part, tools)]
+            rebuilt = " ".join(part.strip() for part in surviving).strip()
+            if rebuilt:
+                kept.append(rebuilt)
+            continue
+        kept.append(line)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    # Removing a line must not leave the gap it sat in.
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
+
+
 def core_answer_text(response: str) -> str:
     """Stored answer body without the Next suggestion."""
 
