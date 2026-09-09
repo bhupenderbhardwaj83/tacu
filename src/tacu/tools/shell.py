@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import ToolContext, ToolFailure, ToolSpec, schema
+from ..execution import run_captured
 
 SPEC = ToolSpec(
     "shell",
@@ -87,31 +88,16 @@ def execute(context: ToolContext, *, executable: str, args: list[str] | None = N
     working = context.guarded_path(cwd)
     before = _change_snapshot(executable, arguments, working, context)
     started = time.monotonic()
-    try:
-        completed = subprocess.run([binary, *arguments], cwd=working, capture_output=True, timeout=max(1, timeout), check=False)
-    except subprocess.TimeoutExpired as error:
-        stdout = error.stdout if isinstance(error.stdout, bytes) else (error.stdout or "").encode()
-        stderr = error.stderr if isinstance(error.stderr, bytes) else (error.stderr or "").encode()
-        artifacts = context.save_artifacts(stdout=stdout, stderr=stderr)
-        out, out_cut = context.bounded_text(stdout.decode(errors="replace"))
-        err, err_cut = context.bounded_text(stderr.decode(errors="replace"))
-        after = _change_snapshot(executable, arguments, working, context)
-        change_audit = ({"before": before, "after": after,
-                         "rollback": "Restore from version control or the recorded pre-change hash."}
-                        if context.policy_level == "log" else None)
-        return {"exit_code": 124, "stdout": out, "stderr": err + f"\nTimed out after {timeout}s.",
-                "duration_ms": round((time.monotonic()-started)*1000), "risk": level,
-                "raw_artifacts": artifacts, "change_audit": change_audit,
-                "_truncated": out_cut or err_cut}
-    artifacts = context.save_artifacts(stdout=completed.stdout, stderr=completed.stderr)
+    exit_code, raw_out, raw_err, cut = run_captured([binary, *arguments], cwd=working,
+                                                   timeout=timeout)
+    artifacts = context.save_artifacts(stdout=raw_out, stderr=raw_err)
     after = _change_snapshot(executable, arguments, working, context)
     change_audit = ({"before": before, "after": after,
                      "rollback": "Restore from version control or the recorded pre-change hash."}
                     if context.policy_level == "log" else None)
-    stdout, out_cut = context.bounded_text(completed.stdout.decode(errors="replace"))
-    stderr, err_cut = context.bounded_text(completed.stderr.decode(errors="replace"))
-    return {"exit_code": completed.returncode, "stdout": stdout.rstrip(), "stderr": stderr.rstrip(),
+    stdout, out_cut = context.bounded_text(raw_out.decode(errors="replace"))
+    stderr, err_cut = context.bounded_text(raw_err.decode(errors="replace"))
+    return {"exit_code": exit_code, "stdout": stdout.rstrip(), "stderr": stderr.rstrip(),
             "duration_ms": round((time.monotonic()-started)*1000), "risk": level,
             "command": [str(binary), *arguments], "raw_artifacts": artifacts,
-            "change_audit": change_audit, "_truncated": out_cut or err_cut}
-
+            "change_audit": change_audit, "_truncated": cut or out_cut or err_cut}

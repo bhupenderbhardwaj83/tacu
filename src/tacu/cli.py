@@ -16,6 +16,8 @@ import sys
 import textwrap
 import threading
 import time
+from contextlib import nullcontext
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, field, replace
@@ -49,6 +51,7 @@ from .harness import (
     correction_from_failure, critique_goal, format_critic_evidence, snapshot_edit_targets,
 )
 from .routing import (
+    CAPABILITIES,
     HOST_MUTATE_KEYS, capability_risk, directory_target_from_intent, extract_file_write,
     intent_mutates_workspace,
     is_shell_cd_intent, intent_host_domain, intent_is_explanatory, intent_wants_host_mutate,
@@ -111,6 +114,14 @@ class FriendlyArgumentParser(argparse.ArgumentParser):
         print("No command was run.", file=sys.stderr)
         print("Try ti help for the short guide or ti all for the tutorial.", file=sys.stderr)
         raise SystemExit(2)
+
+
+class ModelOverride(argparse.Action):
+    """Distinguish an explicit --model from the ordinary chat default."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.model_explicit = True
 
 
 def _split_ask_options(tail: list[str]) -> tuple[list[str], list[str]]:
@@ -3173,39 +3184,46 @@ def _step_fingerprint(step: Any) -> str:
 
 
 def _coding_client(arguments: argparse.Namespace) -> ModelProvider:
-    """Start on the small model, and be ready to hand over to the bigger one.
-
-    Most jobs are ordinary and the small model is quicker and lighter for them.
-    Which jobs are not ordinary cannot be told from the wording — both models
-    answer "refactor the auth module" with a single tool call — so the run starts
-    small and moves up when it has shown it is stuck. See escalation.py.
-    """
+    """Use the coding model from the first action, independently of chat defaults."""
 
     from . import coding
 
-    stronger = coding.coding_model()
-    arguments.escalate_to = stronger if coding.model_is_installed(stronger) else ""
-    if not arguments.escalate_to:
-        print(paint(f"  note · {stronger} is not installed, so this run cannot step up "
-                    f"to it. Install it with: ollama pull {stronger}", PALETTE.yellow))
-
     profile = coding.PROFILE
-    # A reasoning model spends its first tokens thinking, so the budgets that
-    # suit the small planner truncate this one into malformed JSON.
-    os.environ.setdefault("TACU_NUM_PREDICT", str(profile.num_predict))
-    os.environ.setdefault("TACU_NUM_CTX", str(profile.num_ctx))
-    if getattr(arguments, "max_steps", None) in (None, 0):
+    if getattr(arguments, "max_steps", None) is None:
         arguments.max_steps = profile.max_steps
-    arguments.max_steps = max(1, min(int(arguments.max_steps), coding.MAX_CODING_STEPS))
+    if not 1 <= arguments.max_steps <= coding.MAX_CODING_STEPS:
+        raise TacuError(f"--max-steps must be between 1 and {coding.MAX_CODING_STEPS}.")
+
+    starting = (arguments.model if getattr(arguments, "model_explicit", False)
+                else coding.coding_model())
+    arguments.model = starting
+    arguments.escalate_to = ""
+    arguments.coding_profile = True
     if getattr(arguments, "timeout", 0) and arguments.timeout < profile.timeout:
         arguments.timeout = profile.timeout
-    arguments.coding_profile = True
-    starting = arguments.model or configured_model() or default_chat_model()
-    step_up = f" · steps up to {arguments.escalate_to} if it stalls" if arguments.escalate_to else ""
-    print(paint(f"CODE  starting with {starting} · {arguments.max_steps} step budget{step_up}",
+    # A reasoning model spends its first tokens thinking, so the budgets that
+    # suit chat are too small. Restore the environment so a later invocation in
+    # this process still gets its ordinary defaults; explicit tuning wins.
+    defaults = {"TACU_NUM_PREDICT": str(profile.num_predict),
+                "TACU_NUM_CTX": str(profile.num_ctx)}
+    added = [name for name in defaults if name not in os.environ]
+    try:
+        for name in added:
+            os.environ[name] = defaults[name]
+        client = load_provider(arguments.provider, base_url=arguments.url, model=starting,
+                               timeout=arguments.timeout)
+    finally:
+        for name in added:
+            os.environ.pop(name, None)
+
+    if (not getattr(arguments, "dry_run", False)
+            and not getattr(arguments, "keep_models", False) and provider_is_local(client)):
+        released = coding.release_other_models(starting)
+        if released:
+            print(paint(f"  models · unloaded {', '.join(released)} to make room", PALETTE.muted))
+    print(paint(f"CODE  starting with {starting} · {arguments.max_steps} step budget",
                 PALETTE.accent + PALETTE.bold))
-    return load_provider(arguments.provider, base_url=arguments.url, model=starting,
-                         timeout=arguments.timeout)
+    return client
 
 
 def _piped_evidence(arguments: argparse.Namespace) -> dict[str, Any] | None:
@@ -3239,23 +3257,72 @@ def _pipe_is_the_subject(intent: str) -> bool:
                 or intent_wants_host_mutate(intent))
 
 
+# Composition, asked for directly. A look cannot help write a poem, and this is
+# a genuinely closed set of leading verbs — unlike "every way to phrase a
+# question", which is not, and which is why the question-word list below could
+# never be completed.
+_COMPOSES = re.compile(
+    r"(?i)^\s*(?:please\s+|can you\s+|could you\s+)*"
+    r"(?:write|compose|draft|invent|imagine|rephrase|reword|paraphrase|translate)\b")
+
+
+# The capability table lists these as entities, but they are things one *does*,
+# not things one asks about: "stop" belongs to a container and also to "stop this
+# request". A bare imperative is not a subject, so on its own it does not make a
+# question one about this machine. Closed set — imperatives do not multiply the
+# way phrasings do.
+_ACTION_WORDS = frozenset((
+    "add", "checkout", "cleanup", "clone", "delete", "discard", "exec", "execute",
+    "fetch", "install", "kill", "launch", "merge", "open", "pause", "pop", "prune",
+    "pull", "push", "reboot", "remove", "reset", "restart", "restore", "resume",
+    "revert", "run", "stage", "start", "stop", "switch", "uninstall", "unpause",
+    "upgrade",
+))
+
+
+@lru_cache(maxsize=1)
+def _inspectable_words() -> frozenset[str]:
+    """Every subject the capability table knows how to go and look at.
+
+    Derived from the 154 capabilities rather than written out again here, so
+    teaching TACU a new subject widens what counts as a question about this
+    machine without anyone remembering to update a second list.
+    """
+
+    words: set[str] = set()
+    for capability in CAPABILITIES:
+        for entity in capability.entities:
+            words.update(word for word in re.split(r"\W+", entity.casefold()) if len(word) > 2)
+    return frozenset(words) - _ACTION_WORDS
+
+
 def _looks_up_facts(query: str) -> bool:
     """Is this a question about this machine or this codebase, rather than language?
 
-    A factual question deserves a look. A request to translate, rephrase or
-    explain a concept does not, and dragging tools into it would be worse than
-    useless.
+    Two signals, either sufficient. The first is the question form. The second
+    is the one that does the real work: the query names something a tool can go
+    and inspect — a process, a port, a container, a branch, a file.
+
+    The question form alone was not enough. "please tell me all the python
+    servers running on my machine" contains none of those words, so looking was
+    refused and the question was answered from nothing while six servers were
+    listening. Naming a subject is a far more reliable signal than the grammar
+    someone happened to use to ask about it.
     """
 
     if not query or intent_is_explanatory(query) or is_language_question(query):
         return False
-    return bool(re.search(
-        r"(?i)\b(?:is|are|was|were|do|does|did|how many|how much|which|what|where|"
-        r"list|show|find|count|any)\b", query))
+    if _COMPOSES.match(query):
+        return False
+    if re.search(r"(?i)\b(?:is|are|was|were|do|does|did|how many|how much|which|what|where|"
+                 r"list|show|find|count|any)\b", query):
+        return True
+    return bool({word for word in re.split(r"\W+", query.casefold()) if word}
+                & _inspectable_words())
 
 
 def _answer_by_looking(query: str, client: ModelProvider, arguments: argparse.Namespace,
-                       store: HistoryStore) -> int:
+                       store: HistoryStore, hint: str = "") -> int:
     """Answer a factual question by using tools, not by asking the model blind.
 
     This is the path that used to end in a confident invention. Routing picks a
@@ -3267,17 +3334,18 @@ def _answer_by_looking(query: str, client: ModelProvider, arguments: argparse.Na
 
     from . import coding as coding_module
     from .codingloop import CodingLoop
+    from .codingpolicy import dispatch_tool
 
     workspace = _intent_workspace(getattr(arguments, "workspace", None))
 
+    def refuse(message: str) -> bool:
+        # A lane that only reads has nothing to approve. Saying so out loud is
+        # better than a callback that could quietly start agreeing to things.
+        return False
+
     def dispatch(name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        context = ToolContext(workspace, app_home())
-        result = invoke_tool(name, payload, context)
-        data = dict(result.data or {})
-        data.setdefault("status", "success" if result.ok else "error")
-        if not result.ok and result.error:
-            data["error"] = result.error
-        return data
+        return dispatch_tool(name, payload, workspace, app_home(), invoke_tool, refuse,
+                             surface=coding_module.ANSWER_TOOL_SURFACE, lane="ti ask")
 
     def announce(kind: str, message: str) -> None:
         if kind == "call":
@@ -3289,11 +3357,14 @@ def _answer_by_looking(query: str, client: ModelProvider, arguments: argparse.Na
 
     loop = CodingLoop(workspace=workspace, goal=query, client=client,
                       tools=coding_module.answer_tool_schemas(), dispatch=dispatch,
-                      max_steps=LOOKUP_STEPS, on_event=announce, read_only=True,
+                      max_steps=LOOKUP_STEPS, on_event=announce, read_only=True, hint=hint,
                       escalate_to=_stronger_model(), make_client=lambda model: load_provider(
                           arguments.provider, base_url=arguments.url, model=model,
                           timeout=arguments.timeout))
-    outcome = loop.run()
+    from .pager import suspend_pager
+
+    with suspend_pager():
+        outcome = loop.run()
     if not outcome.completed or not outcome.answer.strip():
         # Never fill the gap with prose: say the looking did not settle it.
         body = (f"I could not settle this by looking. {outcome.steps} action(s) were run "
@@ -3318,6 +3389,50 @@ def _stronger_model() -> str:
 
 # A factual lookup is a handful of reads, not a build.
 LOOKUP_STEPS = 8
+
+
+def _routing_hint(intent: str) -> str:
+    """Name the capability routing favoured, without carrying its arguments.
+
+    Routing is good at *which* tool answers a question and unreliable at *what*
+    to pass it — the arguments come from regex over the user's wording. Handing
+    the loop the name keeps the useful half and drops the half that fails.
+    """
+
+    for item in native_steps_for_intent(intent) or []:
+        tool, operation = item.get("tool"), item.get("operation")
+        if tool and operation:
+            return f"{tool}.{operation}"
+    return ""
+
+
+def _run_found_nothing(results: list[dict[str, Any]] | None) -> bool:
+    """Did every step run cleanly and still come back with nothing?
+
+    This is the one outcome that must never be reported as an answer. The steps
+    were built by regex from the user's wording, so an empty result says the
+    guessed arguments matched nothing — not that nothing is there. Six Python
+    servers were listening when `process.graph` was handed the filter
+    "python servers" and reported none.
+    """
+
+    if not results:
+        return False
+    for item in results:
+        outcome = item.get("result") or {}
+        if not outcome.get("ok"):
+            return False          # a failure reports itself; re-looking would hide it
+        data = outcome.get("data") or {}
+        if data.get("status") == "no_results":
+            continue
+        if "count" in data and int(data.get("count") or 0) == 0:
+            continue
+        # Emptiness has to be stated. A tool that reports no count at all has
+        # still come back with something — network.interfaces returns the
+        # primary address and no count, and reading that as "no evidence" sent
+        # a question it had already answered off to be looked up again.
+        return False
+    return True
 
 
 def resolve_working_workspace(explicit: Path | None, *, verb: str) -> Path:
@@ -3377,99 +3492,215 @@ def resolve_working_workspace(explicit: Path | None, *, verb: str) -> Path:
         print("Choose a, t, k, or q.")
 
 
-def handle_coding_command(arguments: argparse.Namespace, client: ModelProvider) -> int:
-    """Run one coding job as a step-at-a-time loop rather than a batch plan."""
+INTENT_LOOP_STEPS = 12
+
+
+def _intent_loop_enabled(arguments: argparse.Namespace) -> bool:
+    """Is this run using the agent loop instead of the batch planner?
+
+    Opt-in for one release. The planner still answers most host questions
+    correctly and instantly, and the deterministic answers built on top of it
+    are the fastest thing TACU does. This exists so the two can be compared on
+    real work before either becomes the default.
+    """
+
+    return bool(getattr(arguments, "loop", False)
+                or os.environ.get("TACU_INTENT_LOOP", "").strip().casefold()
+                in {"1", "true", "yes", "on"})
+
+
+def _run_intent_by_loop(intent: str, client: ModelProvider, arguments: argparse.Namespace,
+                        workspace: Path, *, autonomous: bool) -> int:
+    """Answer or carry out an intent one action at a time, adapting as it goes.
+
+    The same mechanism as `ti code`, given the host surface instead of the
+    coding one. What separates `ti auto` from `ti do` here is only who is asked
+    before a change: nothing about the checking differs, because the policy gate
+    and each tool's own approval sit under both.
+    """
 
     from . import coding as coding_module
-    from .codingloop import CodingLoop
+    from .coding import release_other_models
+    from .codingloop import INTENT_PREFIX, CodingLoop
+    from .codingpolicy import dispatch_tool
 
-    intent = _intent_text(arguments.intent)
-    if not intent:
-        raise TacuError("ti code needs a goal. Example: ti code add a health endpoint and a test")
-    workspace = resolve_working_workspace(arguments.workspace, verb="code")
+    verb = "auto" if autonomous else "do"
+    # Measured, not assumed: this surface is 14 tools and about 8.5 KB of schema
+    # against the lookup lane's 9 and 4.8 KB. gemma4:12b called `process` ten
+    # times running and never answered; qwen answered in seven and correctly
+    # excluded TACU's own processes from the result. Start on a model that can
+    # drive the surface it is given, and say so rather than switching quietly.
+    stronger = _stronger_model()
+    if stronger and not getattr(arguments, "model_explicit", False) and stronger != client.model:
+        release_other_models(stronger)
+        print(paint(f"  models · using {stronger}; this surface is larger than chat defaults "
+                    f"handle reliably", PALETTE.muted))
+        client = load_provider(arguments.provider, base_url=arguments.url, model=stronger,
+                               timeout=arguments.timeout)
+
+    def approve(description: str) -> bool:
+        print(paint("REVIEW REQUIRED · " + description, PALETTE.yellow))
+        if not sys.stdin.isatty():
+            # Refusing is the safe answer, and the tool's own message already
+            # carries the command to run by hand.
+            print(paint("  not a terminal — refused. Re-run in a terminal to approve.",
+                        PALETTE.muted))
+            return False
+        try:
+            return input("Run this operation? [y/N] ").strip().casefold() in {"y", "yes"}
+        except EOFError:
+            return False
 
     def dispatch(name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        context = ToolContext(workspace, app_home(), approve_dangerous=True)
-        result = invoke_tool(name, payload, context)
-        data = dict(result.data or {})
-        data.setdefault("status", "success" if result.ok else "error")
-        if not result.ok and result.error:
-            data["error"] = result.error
-        return data
+        return dispatch_tool(name, payload, workspace, app_home(), invoke_tool, approve,
+                             surface=coding_module.intent_surface(autonomous=autonomous),
+                             lane=f"ti {verb}")
 
     def announce(kind: str, message: str) -> None:
-        if kind == "call":
-            print(paint(f"  → {message}", PALETTE.muted))
-        elif kind == "refused":
-            print(paint(f"  ✗ {message}", PALETTE.yellow))
-        elif kind == "escalate":
-            print(paint(f"  ↑ {message}", PALETTE.accent + PALETTE.bold))
-        elif kind == "models":
-            print(paint(f"  models · {message}", PALETTE.muted))
-        elif kind == "done":
-            print(paint(f"  ✓ {message}", PALETTE.green))
+        marker = {"call": "→", "result": "·", "refused": "✗", "done": "✓", "escalate": "↑"}.get(kind, "·")
+        color = PALETTE.yellow if kind == "refused" else PALETTE.green if kind == "done" else PALETTE.muted
+        print(paint(f"  {marker} {message}", color), flush=True)
 
-    def stronger_client(model: str) -> ModelProvider:
-        return load_provider(arguments.provider, base_url=arguments.url, model=model,
-                             timeout=arguments.timeout)
+    print(paint(f"{verb.upper()}  {intent}", PALETTE.accent + PALETTE.bold))
+    print(paint(f"  loop · {workspace} · {INTENT_LOOP_STEPS} step budget", PALETTE.muted))
+    loop = CodingLoop(workspace=workspace, goal=intent, client=client,
+                      tools=coding_module.intent_tool_schemas(autonomous=autonomous),
+                      dispatch=dispatch, max_steps=INTENT_LOOP_STEPS, on_event=announce,
+                      read_only=True, system_prefix=INTENT_PREFIX,
+                      hint=_routing_hint(intent),
+                      escalate_to="" if client.model == stronger else stronger,
+                      make_client=lambda model: load_provider(
+                          arguments.provider, base_url=arguments.url, model=model,
+                          timeout=arguments.timeout))
+    from .pager import suspend_pager
+
+    with suspend_pager():
+        outcome = loop.run()
+    body = outcome.answer.strip() if outcome.completed and outcome.answer.strip() else (
+        f"I could not settle this in {outcome.steps} action(s). "
+        f"{outcome.stopped or 'Nothing conclusive came back.'}")
+    response = normalize_answer_for_storage(body)
+    print(render_answer(response, query=intent))
+    with HistoryStore(app_home() / "history.db") as store:
+        store.add(model=f"{client.model}/{verb}-loop", query=intent, response=response,
+                  tool_result=None)
+    return 0
+
+
+def handle_coding_command(arguments: argparse.Namespace, client: ModelProvider | None) -> int:
+    """Run, resume, inspect or undo a durable coding job in the selected workspace."""
+    from . import coding as coding_module
+    from .codingloop import CodingLoop
+    from .codingpolicy import dispatch_coding
+    from .codingstate import CodingState
+
+    intent = _intent_text(arguments.intent) if arguments.intent else ""
+    workspace = resolve_working_workspace(arguments.workspace, verb="code")
+    state = CodingState(workspace, app_home())
+    resume = getattr(arguments, "resume", False)
+    undo = getattr(arguments, "undo", False)
+    if getattr(arguments, "status", False):
+        saved = state.load()
+        print(f"CODE {saved['status']} · {saved['total_actions']} total actions")
+        print(f"  goal: {saved['goal']}")
+        print(f"  model: {saved['model']}")
+        print(f"  checkpoint: {state.path}")
+        print(f"  last result: {saved.get('stopped') or saved['status']}")
+        for item in saved.get("recent_results", [])[-5:]:
+            print("  " + item)
+        return 0
+    if not intent and not resume and not undo:
+        raise TacuError("ti code needs a goal. Example: ti code add a health endpoint and a test")
+
+    def approve(description: str) -> bool:
+        print(paint("REVIEW REQUIRED · " + description, PALETTE.yellow))
+        if not sys.stdin.isatty():
+            return False
+        try:
+            return input("Run this operation? [y/N] ").strip().casefold() in {"y", "yes"}
+        except EOFError:
+            return False
+
+    def dispatch(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return dispatch_coding(name, payload, workspace, app_home(), invoke_tool, approve)
+
+    def announce(kind: str, message: str) -> None:
+        marker = {"call": "→", "result": "·", "refused": "✗", "done": "✓", "escalate": "↑"}.get(kind, "·")
+        color = PALETTE.yellow if kind == "refused" else PALETTE.green if kind == "done" else PALETTE.muted
+        print(paint(f"  {marker} {message}", color), flush=True)
 
     if getattr(arguments, "dry_run", False):
-        # A loop has no plan to show before it starts — it decides each action from
-        # the result of the last. What can honestly be shown is the setup.
-        print(paint(f"CODE  {intent}", PALETTE.accent + PALETTE.bold))
-        print(paint(f"  workspace : {workspace}", PALETTE.muted))
-        print(paint("  tools     : " + ", ".join(coding_module.CODING_TOOL_SURFACE)
-                    + ", todo_write", PALETTE.muted))
-        print(paint(f"  budget    : {arguments.max_steps} actions", PALETTE.muted))
-        print(paint(f"  escalation: {getattr(arguments, 'escalate_to', '') or 'none available'}",
-                    PALETTE.muted))
-        print(paint("DRY RUN · nothing was run.", PALETTE.green + PALETTE.bold))
+        print(paint(f"CODE  {intent or 'resume saved job'}", PALETTE.accent + PALETTE.bold))
+        print(f"  workspace : {workspace}")
+        print(f"  model     : {client.model}")
+        print("  tools     : " + ", ".join(coding_module.CODING_TOOL_SURFACE) + ", todo_write")
+        print(f"  budget    : {arguments.max_steps} actions")
+        print("DRY RUN · nothing was run.")
         return 0
 
-    loop = CodingLoop(workspace=workspace, goal=intent, client=client,
-                      tools=coding_module.coding_tool_schemas(), dispatch=dispatch,
-                      max_steps=arguments.max_steps, on_event=announce,
-                      escalate_to=getattr(arguments, "escalate_to", ""),
-                      make_client=stronger_client)
-    print(paint(f"CODE  {intent}", PALETTE.accent + PALETTE.bold))
-    print(paint(f"  workspace: {workspace}", PALETTE.muted))
-
-    try:
-        outcome = loop.run()
-    except KeyboardInterrupt:
-        restored = loop.snapshot.restore()
-        loop.snapshot.discard()
-        print(paint(f"\nStopped. Restored {len(restored)} file(s) to their state before this run.",
-                    PALETTE.yellow))
-        return 130
-
-    if outcome.changed:
-        print(paint("  changed: " + ", ".join(outcome.changed[:8]), PALETTE.muted))
-    if outcome.completed:
-        print(render_answer(outcome.answer or "Done.", query=intent))
-        loop.snapshot.discard()
-        return 0
-
-    # Say what stopped it and leave the work in place: a half-finished job the
-    # user can look at beats a rollback they did not ask for.
-    reason = {"step budget": f"Stopped after {outcome.steps} steps without a verified finish.",
-              "model error": f"The model stopped: {outcome.answer}"}.get(
-                  outcome.stopped, "Stopped without a verified finish.")
-    print(paint(reason, PALETTE.yellow + PALETTE.bold))
-    if outcome.changed:
-        print(paint("  Undo with: ti code --undo", PALETTE.muted))
-        _remember_restore(loop.snapshot)
-    return 1
-
-
-_LAST_RESTORE: list[Any] = []
-
-
-def _remember_restore(snapshot: Any) -> None:
-    """Keep the restore point for the session so --undo has something to undo."""
-
-    _LAST_RESTORE.clear()
-    _LAST_RESTORE.append(snapshot)
+    with state.lock():
+        saved = state.load() if resume or undo else None
+        if saved:
+            goal = saved["goal"] + ("\nFollow-up: " + intent if intent else "")
+        else:
+            goal = intent
+        loop = CodingLoop(workspace=workspace, goal=goal, client=client,
+                          tools=coding_module.coding_tool_schemas(), dispatch=dispatch,
+                          max_steps=arguments.max_steps or coding_module.PROFILE.max_steps, on_event=announce)
+        if saved:
+            state.restore(loop, saved)
+        else:
+            state.prepare(loop)
+        if undo:
+            if saved["status"] == "undone":
+                print("This checkpoint has already been undone.")
+                return 0
+            try:
+                restored = loop.snapshot.restore(saved.get("fingerprints"))
+            except (ValueError, OSError) as error:
+                raise TacuError(str(error)) from error
+            for service_id in loop.service_ids:
+                dispatch("service_process", {"operation": "stop", "service_id": service_id})
+            state.save(loop, "undone")
+            print(f"Restored {len(restored)} tracked file(s). Other files were left in place.")
+            return 0
+        if saved and saved["status"] == "undone":
+            raise TacuError("That checkpoint was undone. Start a new coding task.")
+        loop.on_checkpoint = state.save
+        print(paint(f"CODE  {goal}", PALETTE.accent + PALETTE.bold))
+        print(f"  workspace: {workspace}")
+        print(f"  checkpoint: {state.path}")
+        try:
+            outcome = loop.run()
+        except KeyboardInterrupt:
+            loop.stop_reason = "interrupted"
+            state.save(loop, "interrupted")
+            print("\nStopped. Work and checkpoint kept. Use ti code --resume or ti code --undo.")
+            return 130
+        except Exception:
+            loop.stop_reason = "interrupted execution"
+            state.save(loop, "interrupted")
+            raise
+        state.save(loop, "completed" if outcome.completed else outcome.stopped)
+        if outcome.changed:
+            print("  changed: " + ", ".join(outcome.changed[:12]))
+        if outcome.completed:
+            print(render_answer(outcome.answer, query=goal))
+            for service_id, url in loop.guard.services.items():
+                print(f"  running: {url} · service_id: {service_id}")
+            return 0
+        reasons = {"step budget": f"Stopped after {outcome.steps} actions without a verified finish.",
+                   "no progress": "Stopped because the same work repeated without progress.",
+                   "repeated failure": "Stopped after repeated tool failures; work and evidence are saved.",
+                   "approval required": "Paused for required approval. Resume in an interactive terminal.",
+                   "model error": "The model stopped."}
+        print(paint(reasons.get(outcome.stopped, "Stopped without a verified finish."), PALETTE.yellow))
+        if outcome.answer:
+            print(outcome.answer)
+        print("  Continue with: ti code --resume")
+        if outcome.changed:
+            print("  Undo with: ti code --undo")
+        return 1
 
 
 def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) -> int:
@@ -3521,6 +3752,13 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
             if sys.stdout.isatty():
                 _print_turn_actions(turn.id, kind="shell cd is not possible")
         return 0
+    # The agent loop, when asked for. It replaces planning entirely: no plan is
+    # built, so nothing can be discarded for want of an argument a regex could
+    # not derive. Dry runs stay with the planner, because "show me the plan" is
+    # a question about the planner.
+    if _intent_loop_enabled(arguments) and not arguments.dry_run:
+        return _run_intent_by_loop(intent, client, arguments, workspace,
+                                   autonomous=autonomous)
     allow_shell = not autonomous  # ti auto: capability-only; ti do/propose/plan: shell fallback OK
     allow_host_mutate = not autonomous  # kill/brew/service/docker start-stop: ti do only
     if (not autonomous and intent_wants_host_mutate(intent) and sys.stdin.isatty()
@@ -3687,6 +3925,18 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
                 print(paint("CHECK", PALETTE.accent + PALETTE.bold))
                 print(paint(acceptance.summarise(verdict), PALETTE.muted))
 
+    # A clean run that found nothing is not an answer. These steps were built
+    # from the user's wording by regex, so "no results" says the guessed
+    # arguments matched nothing — never that nothing is there. That is exactly
+    # the moment looking properly is worth the time, and routing's capability
+    # goes along as a starting point so the loop rarely needs more than a turn.
+    # Read-only plans only: a mutation is never repeated on this path.
+    if results and read_only_plan and _run_found_nothing(results):
+        print(paint("  nothing matched the routed arguments · looking properly", PALETTE.muted))
+        with HistoryStore(app_home() / "history.db") as store:
+            return _answer_by_looking(intent, client, arguments, store,
+                                      hint=_routing_hint(intent))
+
     if results:
         source = "auto" if autonomous else "do"
         with _recipe_store() as recipes:
@@ -3737,6 +3987,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("-h", "--help", dest="quick_help", action="store_true", help="show progressive help")
     root.add_argument("--version", action="version", version=f"TACU {__version__}")
     root.add_argument("--model", default=(os.environ.get("TACU_MODEL") or configured_model() or default_chat_model()),
+                      action=ModelOverride,
                       help="one-command model override; persistent selection: ti model")
     root.add_argument("--provider", default=os.environ.get("TACU_PROVIDER", "ollama"), help="model provider (default: ollama)")
     root.add_argument("--url", default=os.environ.get("TACU_OLLAMA_URL", DEFAULT_OLLAMA_URL), help="provider base URL")
@@ -3821,6 +4072,8 @@ def parser() -> argparse.ArgumentParser:
     do_parser.add_argument("--workspace", type=Path, help="workspace boundary; defaults to selected workspace")
     do_parser.add_argument("--max-steps", type=int, default=3, help="maximum proposed commands (1-5)")
     do_parser.add_argument("--dry-run", action="store_true", help="show the plan and execute nothing")
+    do_parser.add_argument("--loop", action="store_true",
+                           help="choose each action after seeing the last result, instead of planning up front")
     do_parser.add_argument("intent", nargs=argparse.REMAINDER)
     auto_parser = command_parser(
         "auto", "autonomously run safe commands and pause at deterministic policy gates",
@@ -3830,6 +4083,8 @@ def parser() -> argparse.ArgumentParser:
     auto_parser.add_argument("--max-steps", type=int, default=MAX_AUTONOMOUS_STEPS,
                              help="maximum autonomous commands (1-5)")
     auto_parser.add_argument("--dry-run", action="store_true", help="show policy decisions and execute nothing")
+    auto_parser.add_argument("--loop", action="store_true",
+                             help="choose each action after seeing the last result, instead of planning up front")
     auto_parser.add_argument("intent", nargs=argparse.REMAINDER)
     code_parser = command_parser(
         "code",
@@ -3840,11 +4095,15 @@ def parser() -> argparse.ArgumentParser:
     code_parser.add_argument("--workspace", type=Path,
                              help="workspace boundary; defaults to selected workspace")
     code_parser.add_argument("--max-steps", type=int, default=None,
-                             help="maximum commands (defaults to the coding profile)")
+                             help="maximum coding actions per invocation (1-100; default: 100)")
     code_parser.add_argument("--dry-run", action="store_true",
                              help="show the workspace, tools and budget, and run nothing")
     code_parser.add_argument("--keep-models", action="store_true",
                              help="leave other loaded models in memory instead of unloading them")
+    code_mode = code_parser.add_mutually_exclusive_group()
+    code_mode.add_argument("--resume", action="store_true", help="continue this workspace's saved coding job with a fresh action budget")
+    code_mode.add_argument("--undo", action="store_true", help="restore tracked files from the latest coding job; refuse to overwrite newer edits")
+    code_mode.add_argument("--status", action="store_true", help="show the latest coding checkpoint without loading a model")
     code_parser.add_argument("intent", nargs=argparse.REMAINDER)
     run_parser = command_parser("run", "run a local command and return the exact information requested",
                                 "ti run -q what is the primary interface IP? -- ifconfig",
@@ -5029,6 +5288,14 @@ def _main(argv: list[str] | None = None) -> int:
             print("Providers: " + ", ".join(provider_names()))
             print("Built-in tool profiles: " + ", ".join(profile.name for profile in PROFILES))
             print("Extension groups: tacu.providers, tacu.middleware"); return 0
+        if arguments.subcommand in {"code", "script", "build"}:
+            from .pager import suspend_pager
+
+            # Help has already returned above. Dry runs are ordinary paged output;
+            # a live job must never wait for a scrolling key between actions.
+            with nullcontext() if arguments.dry_run else suspend_pager():
+                client = None if arguments.undo or arguments.status else _coding_client(arguments)
+                return handle_coding_command(arguments, client)
         client = load_provider(arguments.provider, base_url=arguments.url, model=arguments.model,
                                timeout=arguments.timeout)
         if arguments.subcommand in {"model", "models"}:
@@ -5037,9 +5304,6 @@ def _main(argv: list[str] | None = None) -> int:
             return handle_config_command(arguments, client)
         if arguments.subcommand == "web":
             return handle_web_command(arguments, client)
-        if arguments.subcommand in {"code", "script", "build"}:
-            client = _coding_client(arguments)
-            return handle_coding_command(arguments, client)
         if arguments.subcommand in {"do", "propose", "plan", "auto"}:
             return handle_intent_command(arguments, client)
         with HistoryStore(app_home() / "history.db") as store:

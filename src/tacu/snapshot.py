@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import hashlib
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,6 +78,39 @@ class Snapshot:
     workspace: Path
     directory: Path | None = None
     captured: set[str] = field(default_factory=set)
+    created: set[str] = field(default_factory=set)
+    targeted: bool = False
+
+    def _target(self, relative: str) -> Path:
+        candidate = (self.workspace / relative).resolve()
+        if candidate == self.workspace.resolve() or self.workspace.resolve() not in candidate.parents:
+            raise ValueError(f"Snapshot path escapes workspace: {relative}")
+        return candidate
+
+    def capture(self, value: str) -> None:
+        """Capture an exact edit target, including files outside the source suffix list."""
+        target = self._target(value)
+        relative = target.relative_to(self.workspace.resolve()).as_posix()
+        self.targeted = True
+        if relative in self.captured or relative in self.created:
+            return
+        if self.directory is None:
+            self.directory = Path(tempfile.mkdtemp(prefix="tacu-restore-"))
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if target.exists():
+            if not target.is_file() or target.stat().st_size > MAX_FILE_BYTES:
+                raise ValueError(f"Cannot safely snapshot {value}: expected a file no larger than {MAX_FILE_BYTES} bytes.")
+            stored = self.directory / relative
+            stored.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, stored)
+            self.captured.add(relative)
+        else:
+            self.created.add(relative)
+
+    def fingerprints(self) -> dict[str, str | None]:
+        return {name: hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+                for name in sorted(self.captured | self.created)
+                for path in [self._target(name)]}
 
     def take(self) -> Path:
         """Copy the source files once. Calling it again is a no-op."""
@@ -100,6 +135,11 @@ class Snapshot:
 
         if self.directory is None:
             return []
+        if self.targeted:
+            return sorted(name for name in self.captured | self.created
+                          if (self._target(name).exists() if name in self.created else
+                              not self._target(name).is_file() or
+                              self._target(name).read_bytes() != (self.directory / name).read_bytes()))
         differing: list[str] = []
         for path in _walk_source(self.workspace):
             relative = path.relative_to(self.workspace).as_posix()
@@ -113,11 +153,30 @@ class Snapshot:
                 continue
         return sorted(differing)
 
-    def restore(self) -> list[str]:
+    def restore(self, expected: dict[str, str | None] | None = None) -> list[str]:
         """Put the source files back, and delete the ones that were not there."""
 
         if self.directory is None:
             return []
+        if self.targeted:
+            if expected is not None and self.fingerprints() != expected:
+                raise ValueError("Files changed after the checkpoint. Undo refused to overwrite newer work.")
+            changed = self.changed()
+            for relative in changed:
+                target = self._target(relative)
+                if relative in self.created:
+                    target.unlink()
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                descriptor, temporary = tempfile.mkstemp(dir=target.parent, prefix=".tacu-undo-")
+                os.close(descriptor)
+                try:
+                    shutil.copy2(self.directory / relative, temporary)
+                    os.replace(temporary, target)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+            return changed
         restored: list[str] = []
         for relative in sorted(self.captured):
             source = self.directory / relative

@@ -90,7 +90,11 @@ def execute(context: ToolContext, *, operation: str, command: str | None = None,
     _need_docker()
     cap = max(1, min(int(limit or 20), 80))
     if operation in _MUTATE:
-        require_approval(context, f"docker.{operation}")
+        require_approval(
+            context, f"docker.{operation}",
+            f"Run it through the reviewed lane: ti do docker {operation}"
+            + (f" {name}" if name else "")
+            + f" — or yourself: docker {operation}" + (f" {name}" if name else "") + ".")
         if operation == "prune":
             # Never `-a`: pruning images that merely have no container attached
             # deletes work people expect to still be there.

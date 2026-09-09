@@ -140,7 +140,10 @@ def _free_port(start: int) -> int:
 
 
 def _serve(context: ToolContext, *, port: int, open_browser: bool) -> dict[str, Any]:
-    require_approval(context, "filesystem.serve")
+    require_approval(
+        context, "filesystem.serve",
+        f"Run it through the reviewed lane: ti do serve this folder — or yourself: "
+        f"python3 -m http.server {port or 8000} --bind 127.0.0.1 (from {context.workspace}).")
     if _os_critical(context.workspace):
         raise ToolFailure("OS-critical paths cannot be served.", code="os_critical")
     chosen = _free_port(port or 8000)
@@ -231,6 +234,7 @@ def execute(context: ToolContext, *, operation: str, name: str | None = None, ro
     needle = (name or "").strip().strip("'\"`")
     kind = (glob or "").casefold()
     hits: list[dict[str, Any]] = []
+    scanned: list[dict[str, Any]] = []
     searched = [str(item) for item in _roots(root, context.workspace)]
     for base in _roots(root, context.workspace):
         for path in _walk(base, depth=max_depth, limit=cap):
@@ -241,13 +245,25 @@ def execute(context: ToolContext, *, operation: str, name: str | None = None, ro
             label = path.name
             if kind in {"image", "images"} and path.suffix.casefold() not in IMAGE_SUFFIXES:
                 continue
+            item = {"path": str(path), "name": label, "kind": "directory" if is_dir else "file"}
+            if len(scanned) < cap:
+                scanned.append(item)
             if needle and needle.casefold() not in label.casefold() and needle.casefold() not in str(path).casefold():
                 continue
-            hits.append({"path": str(path), "name": label, "kind": "directory" if is_dir else "file"})
+            hits.append(item)
             if len(hits) >= cap:
                 break
         if len(hits) >= cap:
             break
+    # A name that matched nothing was derived from the question by regex, so an
+    # empty result says the guess missed — never that the directory is empty.
+    # Hand back what is actually there and say plainly that the name did not
+    # match, rather than reporting an absence nobody established.
+    widened = ""
+    if needle and not hits and scanned:
+        hits = scanned
+        widened = (f"nothing here is named like \u201c{needle}\u201d; "
+                   f"these are the files that were searched")
     files = [item for item in hits if item["kind"] == "file"]
     if operation == "open":
         target = Path((files or hits)[0]["path"]) if (files or hits) else None
@@ -328,5 +344,6 @@ def execute(context: ToolContext, *, operation: str, name: str | None = None, ro
     status = "success" if hits else "no_results"
     return {
         "status": status, "operation": operation, "query": needle or glob, "root": root,
-        "matches": hits, "count": len(hits), "searched": searched, "exit_code": 0,
+        "matches": hits, "count": len(hits), "searched": searched, "widened": widened,
+        "exit_code": 0,
     }

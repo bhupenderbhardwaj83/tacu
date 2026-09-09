@@ -143,6 +143,7 @@ _tacu() {
           '--json[JSON output]' \
           '*:file:_files' ;;
       esac ;;
+    code|script|build) _arguments '--workspace=[workspace]:directory:_directories' '--max-steps=[action budget, 1-100]:count:' '--resume[continue saved job]' '--status[show checkpoint]' '--undo[restore tracked files]' '--dry-run[show setup]' '--keep-models[leave models loaded]' '*:goal words:' ;;
     do|propose|plan|auto) _arguments '--workspace=[workspace boundary]:directory:_directories' '--max-steps=[step limit]:count:(1 2 3 4 5)' '--dry-run[show plan without execution]' '*:intent words:' ;;
     ask|analyze) _arguments \
       '--keys=[JSON keys to keep]:keys:' \
@@ -803,6 +804,7 @@ def bash_completion() -> str:
   if [[ ${{COMP_WORDS[1]}} == extract && $COMP_CWORD -eq 2 ]]; then COMPREPLY=( $(compgen -W "juicy" -- "$current") ); return; fi
   if [[ ${{COMP_WORDS[1]}} == juicy ]]; then COMPREPLY=( $(compgen -W "--ask --format --min-confidence --kind --grep -o --output --turn --reports --resume --all-files" -f -- "$current") ); return; fi
   if [[ ${{COMP_WORDS[1]}} == ask || ${{COMP_WORDS[1]}} == analyze ]]; then COMPREPLY=( $(compgen -W "--keys --cols --path --grep --head --tail --limit --no-ai" -- "$current") ); return; fi
+  if [[ ${{COMP_WORDS[1]}} == code || ${{COMP_WORDS[1]}} == script || ${{COMP_WORDS[1]}} == build ]]; then COMPREPLY=( $(compgen -W "--resume --status --undo --dry-run --workspace --max-steps --keep-models" -- "$current") ); return; fi
   if [[ ${{COMP_WORDS[1]}} == auto || ${{COMP_WORDS[1]}} == do ]]; then COMPREPLY=( $(compgen -W "--dry-run --workspace --max-steps" -- "$current") ); return; fi
   COMPREPLY=( $(compgen -f -- "$current") )
 }}

@@ -890,16 +890,24 @@ def print_code_help() -> None:
     print()
     print(paint("USAGE", PALETTE.violet + PALETTE.bold))
     _entry("code", "ti code INTENT", "ti code add a health endpoint and a test for it",
-           "Runs one action at a time against a scoped set of nine coding tools, under the same "
+           "Runs one action at a time against a scoped set of coding tools, under the same "
            "policy gates as ti auto. script and build are aliases.")
     _entry("--dry-run", "ti code --dry-run INTENT", "ti code --dry-run add a login page",
-           "Shows the workspace, the tools, the budget and the step-up model, and runs nothing. "
+           "Shows the model, workspace, tools and budget, and runs nothing. "
            "There is no plan to show: each action is decided from the last result.")
     _entry("--keep-models", "ti code --keep-models INTENT", "ti code --keep-models fix the tests",
-           "Leave other models loaded. By default the one being stepped away from is unloaded.")
+           "Leave other models loaded. By default other local Ollama models are unloaded before coding starts.")
     _entry("--max-steps", "ti code --max-steps N INTENT", "ti code --max-steps 6 refactor the parser",
-           "Raise or lower the step budget (1-10; the default profile uses 8).")
+           "Set the coding action budget (1-100; default: 100). Task-list updates do not spend it. "
+           "Active agent output continues without Enter/Space pager pauses; help and dry runs still page.")
     print()
+    _entry("--resume", "ti code --resume [FOLLOW-UP]", "ti code --resume --max-steps 40",
+           "Continue this workspace's saved goal, task list, results and edits with a fresh action budget. Rechecks old verification.")
+    _entry("--status", "ti code --status", "ti code --status",
+           "Show the latest checkpoint and failures without loading a model.")
+    _entry("--undo", "ti code --undo", "ti code --undo",
+           "Restore tracked files from the latest job. Refuses to overwrite newer edits; leaves unrelated files alone.")
+    print(paint("  Ctrl+C preserves work and checkpoint. Repeated failures stop early with the actual error.", PALETTE.muted))
     print(paint("PROVING THE WORK", PALETTE.violet + PALETTE.bold))
     print(paint("  A job is not finished because files changed. ti code will not conclude while "
                 "changed files are unproven — run the tests, or diagnostics when there are none, "
@@ -908,17 +916,16 @@ def print_code_help() -> None:
                 "write to source: edit_file and write_file record the change and can undo it.",
                 PALETTE.muted))
     print()
+    print(paint("  Custom checks use verify with a purpose and failing assertions. Servers use service_process "
+                "with a loopback health_url, persistent logs, and a final HTTP check. A server PID alone is not success.", PALETTE.muted))
     print(paint("WHICH MODEL", PALETTE.violet + PALETTE.bold))
-    print(paint("  Starts on your default model, because most jobs are ordinary and it is quicker "
-                "and lighter. Steps up to a bigger one when the run shows it is stuck — turns that "
-                "produce nothing, the same call repeated, half the budget spent with nothing "
-                "changed.", PALETTE.muted))
-    print(paint("  Which jobs need the bigger model cannot be told from the wording, so it is "
-                "decided from what the run does, not predicted from the request. It steps up once.",
-                PALETTE.muted))
-    print(paint("  The model stepped away from is unloaded, because a long keep-alive would "
-                "otherwise hold memory the bigger one needs.", PALETTE.muted))
-    print(paint("  ti model use MODEL sets the default  ·  TACU_CODING_MODEL sets the step-up",
+    print(paint("  Starts every coding invocation with qwen3.8:27b-mlx, including follow-ups. "
+                "Your ordinary chat model does not change this default.", PALETTE.muted))
+    print(paint("  TACU_CODING_MODEL selects a different coding model; ti --model MODEL code … "
+                "overrides it for one command. The chosen model stays in use for the whole job.", PALETTE.muted))
+    print(paint("  Install the default if needed: ollama pull qwen3.8:27b-mlx. "
+                "Other local models are unloaded to make room unless --keep-models is set. "
+                "Dry runs never unload models.",
                 PALETTE.muted))
     print()
     print(paint("TRY NEXT: ti code --dry-run add a health endpoint   ·   ti auto for host work",
@@ -1432,7 +1439,8 @@ def print_quick_help() -> None:
            "ti code add a health endpoint and a test for it",
            "Long-horizon work that spans files and commands. Runs one action at a time — "
            "reads, edits, then runs the tests — instead of planning every step up front, "
-           "so it adapts to what a file actually contains.")
+           "so it adapts to what a file actually contains. The default and maximum are 100 actions; "
+           "task-list updates do not count. Live agent output does not pause for paging.")
     _entry("--dry-run", "ti code --dry-run INTENT", "ti code --dry-run add a login page",
            "Shows the workspace, the tools and the budget, and runs nothing.")
     _entry("verify", "(always on)", "ti code fix the failing test",
@@ -1443,9 +1451,9 @@ def print_quick_help() -> None:
            "that looks like a project, it asks whether to add it. ti workspace list shows the "
            "set; ti workspace add remembers one.")
     _entry("models", "(automatic)", "ti code refactor the parser",
-           "Starts on your default model and steps up to a bigger one when a run stalls, "
-           "unloading the smaller one so the memory is free. ti model use MODEL sets the "
-           "default; TACU_CODING_MODEL sets what it steps up to.")
+           "Starts with qwen3.8:27b-mlx on every invocation, independently of the chat model. "
+           "TACU_CODING_MODEL sets the coding default; ti --model MODEL code … overrides it once. "
+           "Other local models are unloaded unless --keep-models is set.")
     print()
 
     _zone("MEMORY / EXPORT")

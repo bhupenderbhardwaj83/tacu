@@ -28,7 +28,7 @@ class ToolHarnessTests(unittest.TestCase):
         expected = ["repo_map", "search_code", "read_file", "inspect_symbol", "edit_file", "write_file",
                     "shell", "diagnostics", "run_tests", "task_state",
                     "process", "network", "system", "application", "ollama", "filesystem", "git", "docker",
-                    "service", "package", "security", "forensics"]
+                    "service", "package", "security", "forensics", "verify", "service_process"]
         self.assertEqual([spec.name for spec in specs()], expected)
         self.assertTrue(all(spec.input_schema and spec.output_schema and spec.timeout > 0 for spec in specs()))
 

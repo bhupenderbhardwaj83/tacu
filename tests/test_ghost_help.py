@@ -182,9 +182,10 @@ class CodingSectionTests(unittest.TestCase):
         with redirect_stdout(shown):
             print_code_help()
         page = strip_ansi(shown.getvalue()).casefold()
-        # It starts small and steps up; it no longer refuses without the big model.
-        self.assertIn("steps up", page)
-        self.assertNotIn("refuses rather than", page)
+        self.assertIn("qwen3.8:27b-mlx", page)
+        self.assertIn("default: 100", page)
+        self.assertIn("without enter/space pager pauses", page)
+        self.assertNotIn("steps up", page)
         self.assertIn("one action at a time", page)
 
 class ReadmeTests(unittest.TestCase):
@@ -313,4 +314,3 @@ class HelpExampleTests(unittest.TestCase):
                 if word and not word.startswith("-"):
                     with self.subTest(verb=verb, action=word):
                         self.assertIn(word, actions, f"{line}: {word} is not a {verb} action")
-

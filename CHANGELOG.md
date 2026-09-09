@@ -2,6 +2,123 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.6.0] - 2026-09-09
+
+### Changed
+
+- A routed lookup that matched nothing is no longer reported as an answer.
+  Native steps are built from the user's wording by regex, so an empty result
+  says the guessed arguments matched nothing, never that nothing is there:
+  `ti ask "please tell me all the python servers running on my machine"`
+  answered "No running process matches python servers" while six were
+  listening. A clean read-only run that finds nothing now hands the question to
+  the lookup loop, which chooses its own tool and arguments after looking.
+  Routing's capability travels with it as a starting point, without its guessed
+  arguments.
+- A question that names something inspectable — a process, a container, a
+  branch, a port — is answered by looking even when it carries no question word.
+  That vocabulary is derived from the capability table rather than listed
+  separately, so a new capability widens it. Composition and bare imperatives
+  are still answered without tools.
+- `process.graph` and `filesystem.find` rank on a guessed value and never
+  exclude on one. Nothing matching the words no longer produces an empty result
+  while processes or files exist; the wider view announces itself, and a partial
+  match says which words it answered and which it did not.
+- A listing that does not fit says what is not shown, instead of letting a count
+  imply everything is on screen.
+- Read-only lookups have their own system prompt. They were sent the coding
+  prompt, told to call `todo_write`, and escalated to a larger model on the first
+  turn for calling a tool a read-only run does not have.
+- Approval refusals carry the command to run by hand. `process.kill`,
+  `docker.*`, `git.*`, `package.*`, `ollama.*`, `service.*`, `application.open`
+  and `filesystem.serve` name both the reviewed lane and the native command,
+  with the real arguments filled in. Refusing to act is the safety property;
+  withholding the command never was.
+
+### Added
+
+- `ti auto --loop` and `ti do --loop` (also `TACU_INTENT_LOOP=1`) choose each
+  action after seeing the last result instead of planning every command up
+  front. Opt-in for one release so both can be compared on real work; the
+  planner remains the default and still answers dry runs. `ti auto` stays
+  capability-only and `ti do` keeps its shell fallback.
+- `process` and `network` are reachable from the coding lane, which previously
+  had only `shell` for host questions and stopped on the repetition guard.
+
+### Fixed
+
+- A tool result that matched nothing no longer authors the answer while another
+  tool in the same run found something. `ti ask "what is my primary ip address"`
+  ran `network.interfaces` and a spurious `process.graph`, and reported
+  "No running process matches primary ip address" instead of the address.
+- Plural mismatches no longer decide an answer: `servers` and `server` are
+  matched as the same word, and a word that answers nothing no longer vetoes a
+  query that was otherwise good.
+
+### Security
+
+- The read-only tool surface is verified where it is offered rather than trusted
+  as a hand-written list. A tool that can change anything now fails the build of
+  `ti ask`'s surface instead of quietly widening it.
+- Every lane that lets a model choose its own arguments passes one policy gate.
+  The lookup lane ran tools without any policy evaluation.
+- Tool output is fenced and marked as data in every system prompt. A process
+  command line, a file, a git log message or a fetched page can be written by
+  someone else and reaches the model that picks the next action; output carrying
+  the closing marker is neutralised so it cannot break out of the fence.
+- The audit log records whether a person approved an operation, not only what
+  the policy decided.
+
+## [0.5.6] - 2026-09-08
+
+### Changed
+
+- Coding defaults to 100 actions (configurable from 1 to 100); other workflow
+  limits are unchanged. Task-list updates have a separate bound. Repeated calls,
+  consecutive failures and empty/truncated replies stop with saved evidence.
+- Coding progress shows action counts, actual command exits and error details.
+  Context retains standing verification, changed files and recent outcomes while
+  bounding both tool results and large edit arguments.
+
+### Added
+
+- `verify` runs custom assertion scripts with an explicit acceptance purpose,
+  independently of their filenames. Failed checks and empty test discovery are
+  not successful verification; diagnostics errors now invalidate completion.
+- `service_process` starts a managed background HTTP server, redirects output to
+  log files, checks loopback readiness, and supports check/logs/stop operations.
+  Requested servers are checked again before completion. Occupied health ports,
+  remote URLs and service IDs from other workspaces are rejected.
+- Durable coding checkpoints with `--status`, `--resume` and `--undo`. Resume
+  carries the goal, task list, recent results, changed files and service IDs into
+  a fresh action budget and invalidates stale verification. Ctrl+C preserves work.
+  A workspace lock prevents simultaneous checkpoint writers.
+
+### Fixed
+
+<!-- RECONSTRUCTED by Claude from the code, after `git checkout CHANGELOG.md`
+     discarded the uncommitted 0.5.5/0.5.6 sections. Everything above this
+     marker is the original text verbatim. Everything below is a reconstruction
+     from the diff and needs your review — the wording is not yours, and the
+     0.5.5/0.5.6 split may be wrong. -->
+
+- Coding tool calls are evaluated by policy at the moment they are dispatched.
+  They had been constructed with blanket pre-approval, so the policy gate never
+  saw them. Path, root, cwd and target are resolved against the workspace jail
+  before the tool runs; blocked calls are refused and gated ones are reviewed.
+  A workspace virtual-environment interpreter is treated as a normal runner
+  while `-c` stays blocked.
+- Verification is decided by the command that ran, not by text that mentions a
+  test runner. The check now parses the command and requires the actual binary,
+  so `echo "pytest passed"` is no longer accepted as evidence. A test result
+  reporting failure invalidates completion.
+- The pager no longer interrupts a live coding run, while `ti help`, dry runs
+  and other output still page as before.
+- Coding starts on `qwen3.8:27b-mlx` and no longer escalates, since it begins on
+  the strongest installed model.
+- Server output is captured to files rather than pipes, so a child process
+  holding an inherited pipe can no longer stall a run.
+
 ## [0.5.4] - 2026-09-08
 
 ### Changed

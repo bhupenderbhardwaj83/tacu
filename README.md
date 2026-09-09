@@ -266,6 +266,54 @@ anything, and **it will not call the job finished while your changes are unprove
 It runs where you are standing when that directory is a known workspace, and asks
 before adopting a new one.
 
+Every coding invocation starts with **`qwen3.8:27b-mlx`** and a **100-action budget**,
+including follow-ups. Chat settings (`ti model use` or `TACU_MODEL`) do not change
+that default. Install it with `ollama pull qwen3.8:27b-mlx`; choose another coding
+model with `TACU_CODING_MODEL`, or override one command with
+`ti --model MODEL code …`. `--max-steps N` accepts 1–100 actions; task-list updates
+do not count against that budget. Other local Ollama models are unloaded before
+coding starts unless you pass `--keep-models`; `--dry-run` never unloads them.
+Live agent output continues without pager pauses. Help, dry runs, and ordinary
+command output still use Enter for a line, Space for a page, and `q` to quit paging.
+
+Coding uses explicit `verify` calls for custom acceptance scripts and
+`service_process` for background HTTP servers. Server startup redirects logs to
+files and checks a loopback URL; completion rechecks the endpoint after edits.
+Syntax errors, empty test discovery, and failed assertions cannot count as a pass.
+Repeated identical actions or consecutive failures stop early with the actual
+error, rather than spending all 100 actions on the same attempt.
+
+Coding checkpoints retain the goal, task list, recent results, changed files,
+verification state and managed service IDs across CLI invocations:
+
+```sh
+ti code --status                    # inspect the latest job in this workspace
+ti code --resume                    # continue it with a fresh action budget
+ti code --resume --max-steps 40      # use a smaller budget for the continuation
+ti code --undo                      # undo tracked edits from the latest job
+```
+
+Ctrl+C preserves the checkpoint and work. Undo refuses to overwrite files changed
+since the checkpoint, and it leaves unrelated files alone. Starting a new goal
+creates a new job; use `--resume` to retain the previous goal and context. Resume
+invalidates old verification so current files and running services must be checked
+again. Only one coding invocation can write a workspace checkpoint at a time.
+
+The coding tool allowlist is enforced before dispatch. Workspace boundaries and
+deterministic execution policy apply to real tool calls; gated operations need
+interactive review and cannot silently execute in a noninteractive run. These are
+application-level controls, not an operating-system sandbox. A passing check
+proves its assertions or HTTP expectations, not arbitrary untested requirements.
+
+Managed services are scoped to their workspace, log to TACU's state directory,
+and have a 24-hour lifetime and a log-size stop threshold. To inspect or stop a
+service after completion, use its returned ID:
+
+```sh
+ti tools run service_process --input '{"operation":"logs","service_id":"RETURNED_ID"}'
+ti tools run service_process --input '{"operation":"stop","service_id":"RETURNED_ID"}'
+```
+
 ```sh
 cd ~/projects/api
 ti code add a /health endpoint and a test for it     # asks to add this directory the first time

@@ -38,11 +38,11 @@ class TodoList:
         for index, raw in enumerate(payload or [], 1):
             if not isinstance(raw, dict):
                 continue
-            task = str(raw.get("task") or "").strip()
+            task = str(raw.get("task") or "").strip()[:500]
             if not task:
                 continue
             status = str(raw.get("status") or PENDING).strip().casefold()
-            rebuilt.append(TodoItem(str(raw.get("id") or index), task,
+            rebuilt.append(TodoItem(str(raw.get("id") or index)[:32], task,
                                     status if status in STATUSES else PENDING))
             if len(rebuilt) >= MAX_ITEMS:
                 break

@@ -35,10 +35,14 @@ def execute(context: ToolContext, *, operation: str, name: str | None = None, li
         raise ToolFailure("package tool currently supports Homebrew on this host.", code="unavailable")
     brew = _brew()
     if operation in {"install", "upgrade", "remove"}:
-        require_approval(context, f"package.{operation}")
+        verb = {"remove": "uninstall"}.get(operation, operation)
+        named = f" {needle}" if needle else ""
+        require_approval(
+            context, f"package.{operation}",
+            f"Run it through the reviewed lane: ti do {operation}{named} — "
+            f"or yourself: brew {verb}{named}.")
         if not needle:
             raise ToolFailure(f"package.{operation} requires name.", code="invalid_arguments")
-        verb = {"remove": "uninstall"}.get(operation, operation)
         raw = run_argv([brew, verb, needle], timeout=SPEC.timeout)
         return {"status": "success" if raw["exit_code"] == 0 else "error", "operation": operation,
                 "name": needle, "stdout": raw["stdout"][-2000:], "stderr": raw["stderr"][-2000:],

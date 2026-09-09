@@ -57,6 +57,7 @@ def _graph(*, pid: int | None, port: int | None, query: str | None,
 
     selected = nodes
     focus = "everything"
+    widened = ""
     if pid is not None:
         selected = [item for item in nodes if item.get("pid") == pid]
         focus = f"pid {pid}"
@@ -65,11 +66,37 @@ def _graph(*, pid: int | None, port: int | None, query: str | None,
                     if any(entry["port"] == port for entry in item.get("listening") or [])]
         focus = f"port {port}"
     elif query:
-        ranked = [(procgraph.match_score(item, query), item) for item in nodes]
-        selected = [item for score, item in
-                    sorted((row for row in ranked if row[0] > 0),
-                           key=lambda row: (-row[0], int(row[1].get("pid") or 0)))]
+        # A guessed value may order these; it may never delete them. The words
+        # come from regex over the question, so returning nothing would say the
+        # guess matched nothing — never that nothing is running. Six Python
+        # servers were listening when the filter "python servers" reported none.
+        ranked = [(procgraph.match_detail(item, query), item) for item in nodes]
+        best = max((hits for (_score, hits), _item in ranked), default=0)
         focus = query
+        if best:
+            # Everything answering as many of the asked-for words as the best
+            # answer does: a tier, not a threshold. No absolute cut-off that one
+            # stray word in the question could push a real match below.
+            selected = [item for (_score, hits), item in
+                        sorted(ranked, key=lambda row: (-row[0][0],
+                                                        int(row[1].get("pid") or 0)))
+                        if hits == best]
+            answered = procgraph.answered_words(selected[0], query) if selected else []
+            missing = [word for word in procgraph.query_words(query) if word not in answered]
+            if missing:
+                # Eleven processes matching "servers" is not eleven Python
+                # servers. Say which half of the question these answer, so a
+                # partial match cannot be reported as a whole one.
+                widened = (f"nothing matches all of \u201c{query}\u201d; these match "
+                           + ", ".join(f"\u201c{word}\u201d" for word in answered)
+                           + " but nothing here is named "
+                           + " or ".join(f"\u201c{word}\u201d" for word in missing))
+        else:
+            serving = [item for item in nodes if item.get("listening")]
+            selected = serving or nodes
+            widened = ("nothing is named like that; these are the processes that "
+                       "are listening" if serving else
+                       "nothing is named like that; these are all the processes")
     else:
         # With nothing named, the useful answer is what is serving.
         selected = [item for item in nodes if item.get("listening")]
@@ -90,6 +117,9 @@ def _graph(*, pid: int | None, port: int | None, query: str | None,
         "status": "success" if selected else "no_results",
         "operation": "graph",
         "focus": focus,
+        # Say when the answer is a wider view than the question asked for, so
+        # nothing downstream can present it as a match.
+        "widened": widened,
         "processes": selected[:limit],
         "count": len(selected),
         "total_processes": len(nodes),
@@ -113,9 +143,13 @@ def execute(context: ToolContext, *, operation: str, limit: int = 10, pid: int |
     if operation in {"inspect", "open_files", "tree"} and pid is None:
         raise ToolFailure(f"{operation} requires pid.", code="invalid_arguments")
     if operation == "kill":
-        require_approval(context, "process.kill")
         if pid is None:
             raise ToolFailure("kill requires pid.", code="invalid_arguments")
+        require_approval(
+            context, "process.kill",
+            f"Check what it is first: ti ask what is process {pid}. "
+            f"Then stop it through the reviewed lane: ti do kill process {pid} — "
+            f"or yourself: kill {pid}, and kill -9 {pid} if it ignores that.")
         import os
         import signal
         try:

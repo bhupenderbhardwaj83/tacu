@@ -699,9 +699,19 @@ def _graph_answer(facts: dict[str, Any]) -> str | None:
         return (f"No running process matches {focus}. "
                 f"{facts.get('total_processes') or 0} processes were examined.")
     lines: list[str] = []
-    if len(nodes) > 1:
-        lines.append(f"{facts.get('count') or len(nodes)} processes match {focus}"
-                     + (", best first:" if len(nodes) > 1 else ":"))
+    total = int(facts.get("count") or len(nodes))
+    # A wider view than the question asked for must announce itself. Reporting
+    # eleven processes as matching "python servers" when only "servers" matched
+    # is the same overclaim as reporting none at all, in the other direction.
+    widened = str(facts.get("widened") or "")
+    if widened:
+        lines.append(f"{widened.capitalize()}.")
+    elif total > 1:
+        lines.append(f"{total} processes match {focus}, best first:")
+    shown = min(len(nodes), 6)
+    if total > shown:
+        # Say what is not on screen rather than letting a count imply a listing.
+        lines.append(f"Showing {shown} of {total}; ask for a specific one by name or port.")
     for node in nodes[:6]:
         ports = ", ".join(f"{entry['port']}" for entry in node.get("listening") or [])
         where = f" on port {ports}" if ports else ""
@@ -1083,6 +1093,23 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
                      ("hostname", "system name", "computer name", "machine name", "host name"))
     if wants_name and hostname and not intent_wants_dns_lookup(query):
         lines.append(f"System name: {hostname}")
+    # A tool that matched nothing must not author the answer while another tool
+    # in the same run did find something. "what is my primary ip address" plans
+    # network.interfaces *and* a process.graph filtered on "primary ip address";
+    # the graph matched nothing, spoke first, and the address TACU had already
+    # read was never reported.
+    #
+    # Compared by identity, not by content: one result can land in two buckets —
+    # operation "inspect" is both a process lookup and a Docker one — and a
+    # record must never count as the other tool that found something.
+    blank = {id(data) for data in process_data
+             if not data.get("processes") and data.get("open_files") is None}
+    if blank and any(id(data) not in blank
+                     for bucket in (network_data, app_data, ollama_data, system_data,
+                                    docker_data, git_data, file_data, service_data,
+                                    package_data, security_data)
+                     for data in bucket):
+        process_data = [data for data in process_data if id(data) not in blank]
     if process_data:
         skip_process = any(word in query for word in ("ollama", "docker", "container"))
         opened = next((data for data in process_data if data.get("open_files") is not None), None)
@@ -1318,8 +1345,16 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
             elif not matches:
                 lines.append(f"No files matching `{data.get('query') or 'the request'}` were found.")
             else:
-                lines.append(f"Found {len(matches)} matching path(s):")
+                # A wider view than the question asked for announces itself, and
+                # a listing that does not fit says so rather than letting the
+                # count imply everything is on screen.
+                widened = str(data.get("widened") or "")
+                lines.append(f"{widened.capitalize()}." if widened
+                             else f"Found {len(matches)} matching path(s):")
                 lines.extend(f"- `{item.get('path')}`" for item in matches[:15])
+                if len(matches) > 15:
+                    lines.append(f"({len(matches) - 15} more not listed; "
+                                 f"narrow it by name or directory.)")
     if ollama_data:
         data = next((item for item in ollama_data
                      if item.get("operation") in {"settings", "version"}), ollama_data[0])

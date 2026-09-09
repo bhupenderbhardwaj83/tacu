@@ -170,29 +170,76 @@ def build(processes: list[dict[str, Any]], listening: list[dict[str, Any]],
     return graph
 
 
-def match_score(node: dict[str, Any], needle: str) -> int:
-    """How well this process answers to the words the user used.
+def same_word(one: str, other: str) -> bool:
+    """Do these name the same thing, allowing a plural on either side?
+
+    `"servers" in "…server"` is False as raw text, and that single letter was
+    enough to report no Python servers while six were listening. Comparing whole
+    words with a plural allowance costs nothing and decides only ordering.
+    """
+
+    one, other = one.casefold(), other.casefold()
+    if one == other:
+        return True
+    longer, shorter = (one, other) if len(one) > len(other) else (other, one)
+    return (len(shorter) > 2 and longer.startswith(shorter)
+            and longer[len(shorter):] in {"s", "es"})
+
+
+def query_words(needle: str) -> list[str]:
+    """The words in a question worth matching a process against."""
+
+    wanted = (needle or "").strip().casefold()
+    if not wanted:
+        return []
+    return [word for word in re.split(r"\W+", wanted) if len(word) > 2] or [wanted]
+
+
+def _identity_words(node: dict[str, Any]) -> list[str]:
+    identity = " ".join(str(node.get(key) or "") for key in
+                        ("runtime", "entrypoint", "label", "role")).casefold()
+    return [word for word in re.split(r"\W+", identity) if word]
+
+
+def answered_words(node: dict[str, Any], needle: str) -> list[str]:
+    """Which of the asked-for words this process actually answers to.
+
+    Reported alongside the results so a partial match can never be presented as
+    a whole one: eleven servers matching "servers" is not eleven Python servers.
+    """
+
+    named = _identity_words(node)
+    return [word for word in query_words(needle)
+            if any(same_word(word, other) for other in named)]
+
+
+def match_detail(node: dict[str, Any], needle: str) -> tuple[int, int]:
+    """How well this process answers to the words used, and how many it answers.
 
     What a process *is* — its runtime, entrypoint, role — outranks a mention
     buried in its raw command line, so asking for "python" finds the server
-    rather than the shell that happened to launch it. Zero means no match.
+    rather than the shell that happened to launch it.
+
+    The count matters as much as the score: it is what lets the caller keep
+    everything that answers the question as well as the best answer does,
+    without any absolute threshold that a guessed word could push a real match
+    below. Nothing here may return an empty result — that decision belongs to
+    the caller, which must never report absence on the strength of a guess.
     """
 
     wanted = (needle or "").strip().casefold()
     if not wanted:
-        return 1
+        return 1, 0
     identity = " ".join(str(node.get(key) or "") for key in
                         ("runtime", "entrypoint", "label", "role")).casefold()
     raw = " ".join(str(node.get(key) or "") for key in
                    ("command", "executable", "user")).casefold()
-    words = [word for word in re.split(r"\W+", wanted) if len(word) > 2] or [wanted]
+    named = _identity_words(node)
+    words = query_words(needle)
 
     score = 0
-    hits = sum(1 for word in words if word in identity)
-    # "python http server" should not be answered by every server on the box, so a
-    # multi-word question needs more than one of its words to land on the identity.
-    if len(words) > 1 and hits < 2 and wanted not in identity:
-        return 0
+    hits = sum(1 for word in words
+               if any(same_word(word, other) for other in named))
     if wanted in identity:
         score += 60
     score += 20 * hits
@@ -205,7 +252,11 @@ def match_score(node: dict[str, Any], needle: str) -> int:
             score += 8
     if score and node.get("listening"):
         score += 25          # something that serves is usually the one being asked about
-    return score
+    return score, hits
+
+
+def match_score(node: dict[str, Any], needle: str) -> int:
+    return match_detail(node, needle)[0]
 
 
 def matches(node: dict[str, Any], needle: str) -> bool:

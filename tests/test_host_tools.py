@@ -451,7 +451,7 @@ class HostToolContractTests(unittest.TestCase):
                                       "write_file", "shell", "diagnostics", "run_tests", "task_state"])
         self.assertEqual(names[10:], ["process", "network", "system", "application", "ollama",
                                       "filesystem", "git", "docker", "service", "package", "security",
-                                      "forensics"])
+                                      "forensics", "verify", "service_process"])
 
     def test_process_top_cpu_returns_structured_rows(self) -> None:
         raw = {"exit_code": 0, "stdout": PS_BSD, "stderr": "", "command": ["/bin/ps"]}
@@ -1213,9 +1213,19 @@ class ProcessGraphTests(unittest.TestCase):
                            procgraph.match_score(shell, "python"))
 
     def test_one_generic_word_does_not_match_every_server(self) -> None:
+        # Still guaranteed, but by ranking rather than by a veto: scoring zero
+        # was how "python servers" came back empty with six of them listening.
+        # rapportd answers one word of the question; the Python server answers
+        # all three, so it wins the tier and rapportd is not in it.
         other = {"runtime": "rapportd", "entrypoint": "", "label": "rapportd",
                  "role": "server", "listening": [{"port": 1}], "command": "/usr/libexec/rapportd"}
-        self.assertEqual(procgraph.match_score(other, "python http server"), 0)
+        real = {"runtime": "python", "entrypoint": "http.server", "role": "server",
+                "label": "python http.server", "listening": [{"port": 8000}],
+                "command": "/usr/bin/python -m http.server"}
+        self.assertLess(procgraph.match_score(other, "python http server"),
+                        procgraph.match_score(real, "python http server"))
+        self.assertEqual(procgraph.match_detail(other, "python http server")[1], 1)
+        self.assertEqual(procgraph.match_detail(real, "python http server")[1], 3)
 
     def test_process_questions_route_to_the_graph(self) -> None:
         expected = {

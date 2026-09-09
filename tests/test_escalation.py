@@ -116,7 +116,7 @@ class LoopEscalationTests(unittest.TestCase):
             loop = self.build(Path(directory))          # no escalate_to
             outcome = loop.run()
             self.assertFalse(outcome.completed)
-            self.assertEqual(outcome.stopped, "step budget")
+            self.assertEqual(outcome.stopped, "no progress")
 
 
 class ReadOnlyLoopTests(unittest.TestCase):

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import ToolContext, ToolFailure, ToolSpec, schema
+from ..execution import run_captured
 
 SPEC = ToolSpec(
     "run_tests",
@@ -28,23 +29,28 @@ def execute(context: ToolContext, *, target: str = ".", framework: str = "auto",
             timeout: int = 300, fail_fast: bool = False) -> dict[str, Any]:
     selected = context.guarded_path(target)
     root = context.workspace.resolve()
+    venv = root / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
+    python = next((str(path) for path in (venv / "python.exe", venv / "python", venv / "python3") if path.is_file()), sys.executable)
+    pytest = next((str(path) for path in (venv / "pytest.exe", venv / "pytest") if path.is_file()), None)
+    if python == sys.executable:
+        pytest = pytest or shutil.which("pytest")
     if framework == "auto":
         # Tests are not always in a tests/ directory. A project with test_x.py
         # beside the code had no detectable framework at all, so a coding run
         # could never prove itself.
         has_dir = (root / "tests").exists()
         beside_code = any(root.glob("test_*.py")) or any(root.glob("*_test.py"))
-        if (has_dir or beside_code) and shutil.which("pytest"): framework = "pytest"
+        if (has_dir or beside_code) and pytest: framework = "pytest"
         # unittest ships with Python, so it is always available to fall back on.
         elif has_dir or beside_code: framework = "unittest"
         elif (root / "Cargo.toml").exists(): framework = "cargo"
         elif (root / "package.json").exists(): framework = "npm"
         elif (root / "go.mod").exists(): framework = "go"
         else: raise ToolFailure("Could not detect a supported test framework.", code="framework_not_found")
-    if framework == "pytest": command = [shutil.which("pytest") or "pytest", "-q", str(selected)] + (["-x"] if fail_fast else [])
+    if framework == "pytest": command = ([pytest] if pytest else [python, "-m", "pytest"]) + ["-q", str(selected)] + (["-x"] if fail_fast else [])
     elif framework == "unittest":
         start = selected if selected != root else (root / "tests" if (root / "tests").is_dir() else root)
-        command = [sys.executable, "-m", "unittest", "discover", "-s", str(start),
+        command = [python, "-m", "unittest", "discover", "-s", str(start),
                    "-p", "test*.py", "-v"]
         if start == root:
             # Tests beside the code import the modules they test, so the workspace
@@ -56,10 +62,10 @@ def execute(context: ToolContext, *, target: str = ".", framework: str = "auto",
     elif framework == "go": command = ["go", "test", "./..."] + (["-failfast"] if fail_fast else [])
     else: raise ToolFailure(f"Unsupported framework: {framework}", code="unsupported_framework")
     started = time.monotonic()
-    try: completed = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=max(1, timeout), check=False)
+    try: exit_code, stdout, stderr, cut = run_captured(command, cwd=root, timeout=timeout)
     except FileNotFoundError as error: raise ToolFailure(f"Test runner not found: {command[0]}", code="missing_dependency") from error
     except subprocess.TimeoutExpired as error: raise ToolFailure(f"Tests timed out after {timeout}s.", code="timeout", retryable=True) from error
-    output = (completed.stdout + "\n" + completed.stderr).strip()
+    output = (stdout.decode(errors="replace") + "\n" + stderr.decode(errors="replace")).strip()
     bounded, truncated = context.bounded_text(output)
     total = 0
     for pattern in (r"Ran (\d+) tests?", r"(\d+) passed", r"ok\s+.+\s+(\d+(?:\.\d+)?)s"):
@@ -82,8 +88,8 @@ def execute(context: ToolContext, *, target: str = ".", framework: str = "auto",
                   "use diagnostics to check the code instead."
                   if pytest_style else
                   "No tests were discovered. Check the file names match test*.py.")
-    return {"framework": framework, "command": command, "passed": completed.returncode == 0,
-            "advice": advice, "exit_code": completed.returncode,
+    passed = exit_code == 0 and not (framework in {"unittest", "pytest"} and total == 0)
+    return {"framework": framework, "command": command, "passed": passed,
+            "advice": advice, "exit_code": exit_code,
             "total": total, "failures": failures, "output": bounded,
-            "duration_ms": round((time.monotonic()-started)*1000), "_truncated": truncated or len(failures) == 50}
-
+            "duration_ms": round((time.monotonic()-started)*1000), "_truncated": cut or truncated or len(failures) == 50}

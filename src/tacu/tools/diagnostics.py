@@ -24,7 +24,9 @@ SPEC = ToolSpec(
 def execute(context: ToolContext, *, path: str, checks: list[str] | None = None) -> dict[str, Any]:
     target = context.guarded_path(path)
     if not target.exists(): raise ToolFailure(f"Path does not exist: {path}", code="file_not_found")
-    files = [target] if target.is_file() else [item for item in target.rglob("*.py") if ".venv" not in item.parts]
+    candidates = [target] if target.is_file() else [item for item in target.rglob("*.py") if ".venv" not in item.parts]
+    files = [item for item in candidates if item.suffix in {".py", ".pyi"} and not item.is_symlink()
+             and context.workspace.resolve() in item.resolve().parents]
     diagnostics: list[dict[str, Any]] = []
     for candidate in files[:500]:
         try: ast.parse(candidate.read_text(encoding="utf-8"), filename=str(candidate))
@@ -46,6 +48,7 @@ def execute(context: ToolContext, *, path: str, checks: list[str] | None = None)
         except json.JSONDecodeError:
             pass
     return {"path": str(target), "backend": ["python-ast"] + (["ruff"] if "ruff" in requested and shutil.which("ruff") else []),
-            "diagnostics": diagnostics, "count": len(diagnostics), "files_checked": len(files),
+            "diagnostics": diagnostics, "count": len(diagnostics), "files_checked": min(500, len(files)),
+            "passed": bool(files) and not diagnostics and len(files) <= 500,
+            "exit_code": 0 if files and not diagnostics and len(files) <= 500 else 1,
             "_truncated": len(files) > 500}
-

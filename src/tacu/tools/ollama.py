@@ -100,7 +100,11 @@ def execute(context: ToolContext, *, operation: str, name: str | None = None) ->
     if not which("ollama"):
         raise ToolFailure("ollama is not installed on this computer.", code="unavailable")
     if operation in _MUTATE:
-        require_approval(context, f"ollama.{operation}")
+        require_approval(
+            context, f"ollama.{operation}",
+            f"Run it through the reviewed lane: ti do ollama {operation}"
+            + (f" {name}" if name else "")
+            + f" — or yourself: ollama {operation}" + (f" {name}" if name else "") + ".")
         needle = require_named_target(name, f"ollama.{operation}")
         argv = ollama_argv(operation) + [needle]
         timeout = 600 if operation == "pull" else SPEC.timeout

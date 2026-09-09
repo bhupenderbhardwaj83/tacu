@@ -21,9 +21,20 @@ class ToolFailure(RuntimeError):
         self.retryable = retryable
 
 
-def require_approval(context: "ToolContext", operation: str) -> None:
+def require_approval(context: "ToolContext", operation: str, guidance: str = "") -> None:
+    """Refuse an unreviewed change, and say how the user can make it themselves.
+
+    A gate that only says no leaves someone stuck: they asked a reasonable
+    question, TACU knows the answer and the exact command, and declines to say
+    either. Refusing to *act* is the safety property; withholding the command is
+    not, and it teaches people to go around TACU rather than through it.
+    """
+
     if not context.approve_dangerous:
-        raise ToolFailure(f"{operation} requires explicit review.", code="approval_required")
+        message = f"{operation} requires explicit review."
+        if guidance:
+            message = f"{message} {guidance}"
+        raise ToolFailure(message, code="approval_required")
 
 
 _UNSAFE_NAME = re.compile(r"[;|&`$(){}[\]\n\r]")
@@ -160,6 +171,11 @@ class ToolContext:
             safe_inputs["args"] = safe_arguments
         safe_inputs["policy_level"] = self.policy_level
         safe_inputs["policy_reasons"] = list(self.policy_reasons)
+        # What the policy decided and what a person actually agreed to are two
+        # different facts, and only the second one answers "who allowed this".
+        # Now that the model chooses the arguments, the log has to record the
+        # invocation that ran rather than the intention behind it.
+        safe_inputs["approved_by_human"] = bool(self.approve_dangerous)
         with self.database() as connection:
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS tool_audit (

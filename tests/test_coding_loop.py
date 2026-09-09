@@ -115,7 +115,7 @@ class LoopTests(unittest.TestCase):
             return {"status": "success"}
 
         return CodingLoop(workspace=workspace, goal="fix multiply", client=FakeClient(turns),
-                          tools=[], dispatch=dispatch, **kwargs)
+                          tools=__import__("tacu.coding", fromlist=["coding_tool_schemas"]).coding_tool_schemas(), dispatch=dispatch, **kwargs)
 
     def test_a_finish_without_proof_is_refused_and_the_loop_continues(self) -> None:
         import contextlib
@@ -141,7 +141,7 @@ class LoopTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             workspace = self.workspace(stack)
             calls: list = []
-            todo = call("todo_write", todos=[{"id": "1", "task": "t", "status": "pending"}])
+            todo = call("todo_write", todos=[{"id": "1", "task": "t", "status": "completed"}])
             turns = [todo, todo, todo, todo,
                      {"content": "Nothing needed changing.", "tool_calls": []}]
             loop = self.build(workspace, turns, calls, max_steps=2)
@@ -162,6 +162,33 @@ class LoopTests(unittest.TestCase):
             self.assertNotIn("shell", [name for name, _ in calls], "the call must not reach the tool")
             self.assertEqual((workspace / "calc.py").read_text(),
                              "def multiply(a, b):\n    return a + b\n")
+
+    def test_verification_on_the_twentieth_action_can_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            calls: list = []
+            turns = [call("write_file", path="calc.py", content="x")]
+            turns += [call("repo_map", depth=i) for i in range(18)]
+            turns += [call("run_tests"),
+                      call("todo_write", todos=[{"id": "1", "task": "fix", "status": "completed"}]),
+                      {"content": "Fixed and verified.", "tool_calls": []}]
+            loop = self.build(Path(directory), turns, calls, max_steps=20)
+            outcome = loop.run()
+            self.assertTrue(outcome.completed, outcome.stopped)
+            self.assertTrue(outcome.verified)
+            self.assertEqual(outcome.steps, 20)
+            self.assertEqual(len(calls), 20)
+            loop.snapshot.discard()
+
+    def test_a_twenty_first_work_action_is_never_dispatched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            calls: list = []
+            turns = [call("repo_map", depth=i) for i in range(21)]
+            loop = self.build(Path(directory), turns, calls, max_steps=20)
+            outcome = loop.run()
+            self.assertFalse(outcome.completed)
+            self.assertEqual(outcome.stopped, "step budget")
+            self.assertEqual(outcome.steps, 20)
+            self.assertEqual(len(calls), 20)
 
     def test_the_system_prefix_is_identical_on_every_turn(self) -> None:
         import contextlib
@@ -216,7 +243,11 @@ class ToolSurfaceTests(unittest.TestCase):
 
         names = [schema["function"]["name"] for schema in coding_tool_schemas()]
         self.assertEqual(names, list(CODING_TOOL_SURFACE))
-        for hidden in ("forensics", "pcapread", "network", "docker", "juicy"):
+        # The surface stays scoped on purpose: a small model given every tool
+        # picks the wrong one. `process` and `network` are in because the lane
+        # starts servers and needs to see whether they came up and what holds a
+        # port; `system` and the specialised lanes are not.
+        for hidden in ("forensics", "pcapread", "docker", "juicy", "system"):
             self.assertNotIn(hidden, names)
 
     def test_long_results_keep_both_ends_and_say_what_was_dropped(self) -> None:

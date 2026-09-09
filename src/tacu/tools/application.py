@@ -291,7 +291,10 @@ def execute(context: ToolContext, *, operation: str, name: str = "", url: str = 
                 "signature": text, "path": target, "exit_code": raw["exit_code"]}
     if operation == "open":
         from .contracts import require_approval
-        require_approval(context, "application.open")
+        require_approval(
+            context, "application.open",
+            f"Run it through the reviewed lane: ti do open {name or url or '<app>'} — "
+            f"or yourself: open " + (f"-a {name!r}" if name else str(url or "")) + ".")
         target = (url or "").strip()
         if target and not _SAFE_URL.match(target):
             raise ToolFailure(

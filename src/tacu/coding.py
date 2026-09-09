@@ -37,8 +37,8 @@ class CodingProfile:
     timeout: int
 
 
-# A build is many small steps; the five-step ceiling suits a single host question.
-MAX_CODING_STEPS = 10
+# Coding gets its own action budget; host and lookup limits stay independent.
+MAX_CODING_STEPS = 100
 
 
 CODING_MODEL = "qwen3.8:27b-mlx"
@@ -47,7 +47,7 @@ PROFILE = CodingProfile(
     num_predict=4096,
     num_ctx=16384,
     cognitive_turns=6,
-    max_steps=8,
+    max_steps=MAX_CODING_STEPS,
     timeout=1800,
 )
 
@@ -135,7 +135,17 @@ def missing_model_message(model: str) -> str:
 # context on schemas it will never use and invites calls that make no sense here.
 CODING_TOOL_SURFACE: tuple[str, ...] = (
     "read_file", "edit_file", "write_file", "search_code", "repo_map",
-    "inspect_symbol", "diagnostics", "run_tests", "shell",
+    "inspect_symbol", "diagnostics", "run_tests", "shell", "verify", "service_process",
+    # Reading the host, which this lane genuinely needs: is the server it
+    # started actually up, and is that port already taken. Without them,
+    # "tell me all the python servers running" had only `shell` to reach for,
+    # ran `ps` three times and stopped on the repetition guard, and a service
+    # start that hit an occupied health port had no way to find out what held
+    # it. Both are read-only, so this widens what the lane can see, not what it
+    # can do. The surface stays scoped deliberately: forensics, docker, juicy
+    # and the rest are still out, and `system` stays out because hardware and
+    # uptime are not part of building and running code.
+    "process", "network",
 )
 
 
@@ -146,6 +156,25 @@ ANSWER_TOOL_SURFACE: tuple[str, ...] = (
     "filesystem", "read_file", "search_code", "repo_map", "inspect_symbol",
     "system", "process", "network", "application",
 )
+
+
+# What `ti auto` and `ti do` reach for: the host lanes people would otherwise
+# drop to a native CLI for, plus enough of the file tools to act on what they
+# find. Deliberately not the coding tools — building software is `ti code`'s
+# job and giving a model both surfaces at once is how it picks the wrong one.
+# Every mutating operation here still passes the policy gate and its own
+# approval check on the way through; the surface decides what can be asked for,
+# never what can be done without asking.
+INTENT_TOOL_SURFACE: tuple[str, ...] = (
+    "process", "network", "system", "application", "filesystem",
+    "docker", "git", "ollama", "package", "service", "security",
+    "read_file", "search_code", "repo_map",
+)
+
+# `ti auto` is capability-only and `ti do` may fall back to a shell — the same
+# split the planner has always made. An argv-only capability is checkable in a
+# way an arbitrary command line is not, so unattended work does not get one.
+REVIEWED_TOOL_SURFACE: tuple[str, ...] = INTENT_TOOL_SURFACE + ("shell",)
 
 
 def tool_schemas(surface: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -174,5 +203,30 @@ def coding_tool_schemas() -> list[dict[str, Any]]:
     return tool_schemas(CODING_TOOL_SURFACE)
 
 
+def intent_tool_schemas(*, autonomous: bool) -> list[dict[str, Any]]:
+    return tool_schemas(intent_surface(autonomous=autonomous))
+
+
+def intent_surface(*, autonomous: bool) -> tuple[str, ...]:
+    return INTENT_TOOL_SURFACE if autonomous else REVIEWED_TOOL_SURFACE
+
+
 def answer_tool_schemas() -> list[dict[str, Any]]:
+    """The read-only surface, checked rather than trusted.
+
+    `ti ask` promises never to change anything, and that promise rested on a
+    hand-written tuple of nine names. Nothing stopped a later edit adding a tool
+    that writes, and nothing would have noticed. A model cannot call what it is
+    never offered, so this is where the promise is actually kept — enforce it
+    here, where the offer is made, rather than hoping the list stays right.
+    """
+
+    from .tools import specs
+
+    writes = sorted(spec.name for spec in specs()
+                    if spec.name in ANSWER_TOOL_SURFACE and spec.risk_level != "read")
+    if writes:
+        raise RuntimeError(
+            "The read-only tool surface must only read; these can change things: "
+            + ", ".join(writes))
     return tool_schemas(ANSWER_TOOL_SURFACE)

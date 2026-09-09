@@ -17,6 +17,7 @@ Three rules, each one a failure seen in practice:
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,7 +51,7 @@ UNREAD_EDIT_REFUSAL = (
 )
 
 MUTATING_TOOLS = frozenset({"edit_file", "write_file"})
-VERIFYING_TOOLS = frozenset({"run_tests", "diagnostics"})
+VERIFYING_TOOLS = frozenset({"run_tests", "diagnostics", "verify"})
 _TEST_COMMAND = re.compile(
     r"(?i)\b(?:pytest|unittest|nose|tox|jest|vitest|mocha|cargo\s+test|go\s+test|"
     r"npm\s+(?:test|run\s+test)|pnpm\s+test|yarn\s+test|make\s+(?:test|check)|"
@@ -67,7 +68,27 @@ def shell_writes_source(command: str) -> bool:
 def command_verifies(command: str) -> bool:
     """Is this shell command a test, a linter, or a type check?"""
 
-    return bool(_TEST_COMMAND.search(command or ""))
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    binary, args = Path(parts[0]).name, parts[1:]
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", binary):
+        return len(args) >= 2 and args[0] == "-m" and args[1] in {"pytest", "unittest"}
+    if binary in {"pytest", "ruff", "flake8", "mypy", "pyright", "tsc", "eslint", "jest", "vitest", "mocha", "tox", "nose"}:
+        return True
+    return ((binary in {"cargo", "go", "npm", "pnpm", "yarn"} and args[:1] == ["test"])
+            or (binary == "npm" and args[:2] == ["run", "test"])
+            or (binary == "make" and args[:1] in (["test"], ["check"])))
+
+
+def wants_server(goal: str) -> bool:
+    return bool(re.search(r"\b(?:run|start|serve|launch)\b", goal, re.I)
+                and re.search(r"\b(?:server|website|web\s*page|flask)\b", goal, re.I)
+                and not (re.search(r"\btests?\b", goal, re.I)
+                         and not re.search(r"\b(?:access|browse|listen|server)\b", goal, re.I)))
 
 
 @dataclass
@@ -80,6 +101,8 @@ class CodingGuard:
     verified: bool = False
     last_check: str = ""
     last_check_failed: bool = False
+    require_service: bool = False
+    services: dict[str, str] = field(default_factory=dict)
 
     def _key(self, path: str | None) -> str:
         text = (path or "").strip()
@@ -110,19 +133,27 @@ class CodingGuard:
     def observe(self, tool: str, arguments: dict, result: dict) -> None:
         """Update what is changed and what is proved, from what actually ran."""
 
-        failed = bool(result.get("status") == "error") or int(result.get("exit_code") or 0) != 0
+        failed = (result.get("status") == "error" or int(result.get("exit_code") or 0) != 0
+                  or result.get("passed") is False)
         if tool == "read_file" and not failed:
             self.read.add(self._key(arguments.get("path")))
             return
         if tool in MUTATING_TOOLS and not failed:
+            if tool == "edit_file" and result.get("changed") is False:
+                return
             self.mutated.add(self._key(arguments.get("path")))
             # A change since the last clean run makes that run stale.
             self.verified = False
+            self.services.clear()
             if tool == "write_file":
                 # Writing a file is also having seen it.
                 self.read.add(self._key(arguments.get("path")))
             return
         if tool in VERIFYING_TOOLS:
+            if tool == "diagnostics":
+                failed = failed or bool(result.get("count")) or not result.get("files_checked")
+            if tool == "verify":
+                failed = failed or result.get("passed") is not True or result.get("exit_code") != 0
             self.last_check = tool
             self.last_check_failed = failed
             self.verified = not failed
@@ -134,10 +165,25 @@ class CodingGuard:
                 self.last_check = " ".join(parts)[:60]
                 self.last_check_failed = failed
                 self.verified = not failed
+        if tool == "service_process":
+            service_id = str(result.get("service_id") or arguments.get("service_id") or "")
+            if arguments.get("operation") in {"start", "check"}:
+                if result.get("healthy") is True and not failed:
+                    self.services[service_id] = str(result.get("url") or "")
+                    if self.require_service:
+                        self.verified = True
+                        self.last_check = "HTTP " + self.services[service_id]
+                else:
+                    self.services.pop(service_id, None)
+            elif arguments.get("operation") == "stop":
+                self.services.pop(service_id, None)
 
     def refuse_completion(self) -> str | None:
         """The reason the job cannot be called finished, or None."""
 
+        if self.require_service and not self.services:
+            return ("The requested server has not passed an HTTP readiness check since the last edit. "
+                    "Use service_process start with a loopback health_url, then check it before finishing.")
         if not self.mutated:
             return None                    # Nothing was changed; nothing to prove.
         if self.verified:

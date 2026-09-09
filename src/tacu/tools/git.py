@@ -151,7 +151,10 @@ def execute(context: ToolContext, *, operation: str, root: str | None = None,
 
     if operation == "clone":
         # Cloning creates the repository, so it cannot require being inside one.
-        require_approval(context, "git.clone")
+        require_approval(
+            context, "git.clone",
+            f"Run it through the reviewed lane: ti do git clone {name or '<url>'} — "
+            f"or yourself: git clone {name or '<url>'}.")
         source = _safe_ref(name, "git.clone")
         destination = (target or "").strip()
         if destination.startswith("-"):
@@ -167,7 +170,10 @@ def execute(context: ToolContext, *, operation: str, root: str | None = None,
         raise ToolFailure(f"{base} is not inside a Git repository.", code="not_a_repo")
 
     if operation in _MUTATE:
-        require_approval(context, f"git.{operation}")
+        require_approval(
+            context, f"git.{operation}",
+            f"Run it through the reviewed lane: ti do git {operation} — "
+            f"or yourself, in {repo}: git {operation}.")
         if operation == "add":
             from ..automation import os_critical_path
             target = require_named_target(name, "git.add")

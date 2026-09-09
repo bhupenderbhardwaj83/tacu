@@ -10,7 +10,7 @@ from typing import Any
 from . import (
     application, diagnostics, docker, edit_file, filesystem, forensics, git, inspect_symbol, network, ollama,
     package, process, read_file, repo_map, run_tests, search_code, security, service, shell, system,
-    task_state, write_file,
+    task_state, write_file, verify, service_process,
 )
 from .contracts import ToolContext, ToolFailure, ToolResult, ToolSpec, validate_inputs
 
@@ -20,7 +20,7 @@ HOST_MODULES: tuple[ModuleType, ...] = (
     process, network, system, application, ollama, filesystem, git, docker, service, package, security,
     forensics,
 )
-MODULES: tuple[ModuleType, ...] = CORE_MODULES + HOST_MODULES
+MODULES: tuple[ModuleType, ...] = CORE_MODULES + HOST_MODULES + (verify, service_process)
 REGISTRY = {module.SPEC.name: module for module in MODULES}
 
 
@@ -50,4 +50,3 @@ def invoke(name: str, inputs: dict[str, Any], context: ToolContext) -> ToolResul
                         {"workspace": str(context.workspace.resolve()), "schema": "tacu.tool-call/v1"})
     context.audit(call_id=call_id, tool=name, ok=ok, duration_ms=duration, inputs=inputs, error=error)
     return result
-
