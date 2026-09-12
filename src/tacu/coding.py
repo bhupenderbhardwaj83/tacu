@@ -167,7 +167,7 @@ ANSWER_TOOL_SURFACE: tuple[str, ...] = (
 # never what can be done without asking.
 INTENT_TOOL_SURFACE: tuple[str, ...] = (
     "process", "network", "system", "application", "filesystem",
-    "docker", "git", "ollama", "package", "service", "security",
+    "docker", "git", "ollama", "package", "service", "security", "recon", "email",
     "read_file", "search_code", "repo_map",
 )
 
@@ -229,4 +229,15 @@ def answer_tool_schemas() -> list[dict[str, Any]]:
         raise RuntimeError(
             "The read-only tool surface must only read; these can change things: "
             + ", ".join(writes))
+    # Reading is not the only way out. `ti ask` answers from this machine, and a
+    # tool that reaches the internet on the model's own initiative — recon —
+    # would let a question about a file turn into requests to a dozen services
+    # nobody asked for. Outbound tools are reached through the planner, where
+    # the user named the target.
+    outbound = sorted(spec.name for spec in specs()
+                      if spec.name in ANSWER_TOOL_SURFACE and "network:outbound" in spec.permissions)
+    if outbound:
+        raise RuntimeError(
+            "The lookup surface must stay on this machine; these reach the internet: "
+            + ", ".join(outbound))
     return tool_schemas(ANSWER_TOOL_SURFACE)

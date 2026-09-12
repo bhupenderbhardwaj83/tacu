@@ -3,4 +3,4 @@
 from .core import HISTORY_LIMIT, TOOL_SCHEMA
 
 __all__ = ["HISTORY_LIMIT", "TOOL_SCHEMA"]
-__version__ = "0.6.1"
+__version__ = "0.7.0"

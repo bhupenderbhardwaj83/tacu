@@ -9,7 +9,7 @@ from typing import Any
 
 from . import (
     application, diagnostics, docker, edit_file, filesystem, forensics, git, inspect_symbol, network, ollama,
-    package, process, read_file, repo_map, run_tests, search_code, security, service, shell, system,
+    mailscan, package, process, read_file, recon, repo_map, run_tests, search_code, security, service, shell, system,
     task_state, write_file, verify, service_process,
 )
 from .contracts import ToolContext, ToolFailure, ToolResult, ToolSpec, validate_inputs
@@ -18,7 +18,7 @@ CORE_MODULES: tuple[ModuleType, ...] = (repo_map, search_code, read_file, inspec
                                         write_file, shell, diagnostics, run_tests, task_state)
 HOST_MODULES: tuple[ModuleType, ...] = (
     process, network, system, application, ollama, filesystem, git, docker, service, package, security,
-    forensics,
+    forensics, recon, mailscan,
 )
 MODULES: tuple[ModuleType, ...] = CORE_MODULES + HOST_MODULES + (verify, service_process)
 REGISTRY = {module.SPEC.name: module for module in MODULES}

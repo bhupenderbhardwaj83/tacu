@@ -451,7 +451,7 @@ class HostToolContractTests(unittest.TestCase):
                                       "write_file", "shell", "diagnostics", "run_tests", "task_state"])
         self.assertEqual(names[10:], ["process", "network", "system", "application", "ollama",
                                       "filesystem", "git", "docker", "service", "package", "security",
-                                      "forensics", "verify", "service_process"])
+                                      "forensics", "recon", "email", "verify", "service_process"])
 
     def test_process_top_cpu_returns_structured_rows(self) -> None:
         raw = {"exit_code": 0, "stdout": PS_BSD, "stderr": "", "command": ["/bin/ps"]}

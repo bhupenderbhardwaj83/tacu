@@ -32,7 +32,17 @@ def detect_shell() -> str:
 
 def zsh_completion() -> str:
     return r'''#compdef ticu ti
+# _tacu_args treats $words[1] as the command and the rest as its arguments.
+# Called with words=(ti juicy CH) it read "juicy" as positional 1 and "CH" as an
+# illegal positional 2 — "no more arguments" — and never offered a file. So
+# every branch shifts past the subcommand(s) it has already dispatched on.
+_tacu_args() {
+  shift $_tacu_depth words
+  (( CURRENT -= _tacu_depth ))
+  _arguments "$@"
+}
 _tacu() {
+  local _tacu_depth=1
   local -a commands command_descs tool_actions tool_action_descs tools
   local -a config_actions model_actions workspace_actions
   commands=(
@@ -115,37 +125,37 @@ _tacu() {
         compadd -Q -d tool_action_descs -a tool_actions
         return
       fi
-      case $words[3] in
+      _tacu_depth=2; case $words[3] in
         describe)
           (( CURRENT == 4 )) && _describe -t tools 'native tool' tools
           ;;
         run)
           if (( CURRENT == 4 )); then _describe -t tools 'native tool' tools; return; fi
-          _arguments '--input=[JSON object]:json:' '--workspace=[workspace]:directory:_directories' '--approve[approve a policy-flagged command]'
+          _tacu_args '--input=[JSON object]:json:' '--workspace=[workspace]:directory:_directories' '--approve[approve a policy-flagged command]'
           ;;
-        map) _arguments '1:directory:_directories' '--depth=[tree depth]:depth:(2 3 4 5 6)' '--symbols[include Python symbols]' '--max-files=[limit]:count:' '--json[JSON output]' ;;
-        find) _arguments '1:name or glob:' '2:directory:_directories' '--type=[entry type]:type:(file directory any)' '--case-sensitive[match exact case]' '--case-insensitive[ignore case; default]' '--max-results=[limit]:count:' '--json[JSON output]' ;;
-        search) _arguments '1:text or pattern:' '2:directory:_directories' '--regex[use regular expression]' '--case-sensitive[match exact case]' '--case-insensitive[ignore case; default]' '--glob=[file glob]:glob:' '--max-results=[limit]:count:' '--json[JSON output]' ;;
-        read) _arguments -C \
+        map) _tacu_args '1:directory:_directories' '--depth=[tree depth]:depth:(2 3 4 5 6)' '--symbols[include Python symbols]' '--max-files=[limit]:count:' '--json[JSON output]' ;;
+        find) _tacu_args '1:name or glob:' '2:directory:_directories' '--type=[entry type]:type:(file directory any)' '--case-sensitive[match exact case]' '--case-insensitive[ignore case; default]' '--max-results=[limit]:count:' '--json[JSON output]' ;;
+        search) _tacu_args '1:text or pattern:' '2:directory:_directories' '--regex[use regular expression]' '--case-sensitive[match exact case]' '--case-insensitive[ignore case; default]' '--glob=[file glob]:glob:' '--max-results=[limit]:count:' '--json[JSON output]' ;;
+        read) _tacu_args -C \
           '--start=[first line]:line:' \
           '--end=[last line]:line:' \
           '--json[JSON output]' \
           '*:file:_files' ;;
-        write) _arguments -C \
+        write) _tacu_args -C \
           '--content=[file body]:text:' \
           '--overwrite[replace an existing file]' \
           '--json[JSON output]' \
           '*:file:_files' ;;
-        edit) _arguments -C \
+        edit) _tacu_args -C \
           '--old=[exact text to replace]:text:' \
           '--new=[replacement text]:text:' \
           '--expected-count=[match count]:count:' \
           '--json[JSON output]' \
           '*:file:_files' ;;
       esac ;;
-    code|script|build) _arguments '--workspace=[workspace]:directory:_directories' '--max-steps=[action budget, 1-100]:count:' '--resume[continue saved job]' '--status[show checkpoint]' '--undo[restore tracked files]' '--dry-run[show setup]' '--keep-models[leave models loaded]' '*:goal words:' ;;
-    do|propose|plan|auto) _arguments '--workspace=[workspace boundary]:directory:_directories' '--max-steps=[step limit]:count:(1 2 3 4 5)' '--dry-run[show plan without execution]' '*:intent words:' ;;
-    ask|analyze) _arguments \
+    code|script|build) _tacu_args '--workspace=[workspace]:directory:_directories' '--max-steps=[action budget, 1-100]:count:' '--resume[continue saved job]' '--status[show checkpoint]' '--undo[restore tracked files]' '--dry-run[show setup]' '--keep-models[leave models loaded]' '*:goal words:' ;;
+    do|propose|plan|auto) _tacu_args '--workspace=[workspace boundary]:directory:_directories' '--max-steps=[step limit]:count:(1 2 3 4 5)' '--dry-run[show plan without execution]' '*:intent words:' ;;
+    ask|analyze) _tacu_args \
       '--keys=[JSON keys to keep]:keys:' \
       '--cols=[CSV columns to keep]:columns:' \
       '--path=[JSON dotted path]:path:' \
@@ -156,10 +166,10 @@ _tacu() {
       '--no-ai[filtered ingest only; no model]' \
       '*:question words:'
       ;;
-    web) _arguments '--results=[search result limit]:count:(5 8 10 12 20)' '--read=-[public pages to read]:count:(0 1 2 3 4 5)' '--snippets[search snippets only]' '--no-ai[list sources without synthesis]' '--json[structured retrieval output]' '1:mode or query:(search fetch health)' '*:query words or public URL:' ;;
+    web) _tacu_args '--results=[search result limit]:count:(5 8 10 12 20)' '--read=-[public pages to read]:count:(0 1 2 3 4 5)' '--snippets[search snippets only]' '--no-ai[list sources without synthesis]' '--json[structured retrieval output]' '1:mode or query:(search fetch health)' '*:query words or public URL:' ;;
     config)
       if (( CURRENT == 3 )); then _values 'config action' $config_actions; return; fi
-      [[ $words[3] == update ]] && _arguments '--model=[model]:model:_tacu_models' '--context-turns=[history turns]:count:(0 1 3 5 8 10)'
+      [[ $words[3] == update ]] && _tacu_args '--model=[model]:model:_tacu_models' '--context-turns=[history turns]:count:(0 1 3 5 8 10)'
       ;;
     model)
       if (( CURRENT == 3 )); then _values 'model action' $model_actions; return; fi
@@ -169,12 +179,12 @@ _tacu() {
       if (( CURRENT == 3 )); then _values 'workspace action' $workspace_actions; return; fi
       [[ $words[3] == (create|use) ]] && _directories
       ;;
-    extract) _arguments '1:kind:(juicy)' '2:file:_files' '--format=[format]:format:(csv json jsonl txt)' '-o[output]:file:_files' '--output=[file]:file:_files' '--min-confidence=[level]:level:(critical high medium low)' '--kind=[kinds]:kinds:' '--grep=[value text]:text:' '--ask=[question]:question:' '--reports=[dir]:dir:_directories' '--resume' '--all-files' ;;
-    juicy) _arguments '1:file or directory:_files' '--format=[format]:format:(csv json jsonl txt)' '-o[output]:file:_files' '--min-confidence=[level]:level:(critical high medium low)' '--kind=[kinds]:kinds:' '--grep=[value text]:text:' '--ask=[question]:question:' '--reports=[dir]:dir:_directories' '--resume' '--all-files' ;;
-    save) _arguments '1:turn id:' '--format=[format]:format:(md txt json)' '--output=[file]:file:_files' ;;
-    evidence) _arguments '1:turn id:' ;;
+    extract) _tacu_args '1:kind:(juicy)' '2:file:_files' '--format=[format]:format:(csv json jsonl txt)' '-o[output]:file:_files' '--output=[file]:file:_files' '--min-confidence=[level]:level:(critical high medium low)' '--kind=[kinds]:kinds:' '--grep=[value text]:text:' '--ask=[question]:question:' '--reports=[dir]:dir:_directories' '--resume' '--all-files' ;;
+    juicy) _tacu_args '1:file or directory:_files' '--format=[format]:format:(csv json jsonl txt)' '-o[output]:file:_files' '--min-confidence=[level]:level:(critical high medium low)' '--kind=[kinds]:kinds:' '--grep=[value text]:text:' '--ask=[question]:question:' '--reports=[dir]:dir:_directories' '--resume' '--all-files' ;;
+    save) _tacu_args '1:turn id:' '--format=[format]:format:(md txt json)' '--output=[file]:file:_files' ;;
+    evidence) _tacu_args '1:turn id:' ;;
     copy)
-      _arguments \
+      _tacu_args \
         '1:turn, last, last:line, or last:a-b:' \
         '--block=[code block N or N:line]:block:' \
         '--command=[recipe id or search]:recipe:' \
@@ -192,11 +202,11 @@ _tacu() {
         compadd -Q -d syntax_action_descs -a syntax_actions
         return
       fi
-      case $words[3] in
+      _tacu_depth=2; case $words[3] in
         search|find) _message 'search text' ;;
         show|rm|delete) _message 'recipe id' ;;
-        add) _arguments '--label=[label]:label:' '*:argv:' ;;
-        clear) _arguments '--yes[confirm clear]' ;;
+        add) _tacu_args '--label=[label]:label:' '*:argv:' ;;
+        clear) _tacu_args '--yes[confirm clear]' ;;
       esac
       ;;
     clip|tray)
@@ -210,12 +220,12 @@ _tacu() {
         compadd -Q -d clip_action_descs -a clip_actions
         return
       fi
-      case $words[3] in
-        add) _arguments '--from-turn=[turn:line]:turn:' '--block=[block]:block:' '--label=[label]:label:' '*:text:' ;;
-        edit) _arguments '--label=[label only]:label:' '1:tray id:' '*:new text:' ;;
+      _tacu_depth=2; case $words[3] in
+        add) _tacu_args '--from-turn=[turn:line]:turn:' '--block=[block]:block:' '--label=[label]:label:' '*:text:' ;;
+        edit) _tacu_args '--label=[label only]:label:' '1:tray id:' '*:new text:' ;;
         show|rm|delete|copy|paste) _message 'tray id' ;;
         search) _message 'query' ;;
-        clear) _arguments '--yes[confirm clear]' ;;
+        clear) _tacu_args '--yes[confirm clear]' ;;
       esac
       ;;
     data|dataset)
@@ -232,8 +242,8 @@ _tacu() {
         compadd -Q -d data_action_descs -a data_actions
         return
       fi
-      case $words[3] in
-        load|add) _arguments '--name[short handle (default dt1, dt2, …)]:name:' '--ttl[hours before sweep]:hours:' \
+      _tacu_depth=2; case $words[3] in
+        load|add) _tacu_args '--name[short handle (default dt1, dt2, …)]:name:' '--ttl[hours before sweep]:hours:' \
           '--delimiter[force a separator]:delimiter:' '--header[first row contains column names]' \
           '--no-header[first row is data]' \
           '--format[force a format]:format:(csv ndjson json xlsx pcap sqlite text registry burp)' \
@@ -241,10 +251,10 @@ _tacu() {
           '--sheet[XLSX sheet name]:sheet:' \
           '--depth[levels of nesting to flatten]:levels:(1 2 3)' \
           '1:file:_files -g "*.(csv|tsv|txt|json|ndjson|jsonl|xlsx|xlsm|pcap|pcapng|cap|bak|db|dat|xml|burp)"' ;;
-        ask|q) _arguments '--steps[maximum queries the model may run]:count:' \
+        ask|q) _tacu_args '--steps[maximum queries the model may run]:count:' \
           '--sql-only[show the SQL without running it]' \
           '1:dataset:($(command ticu __data-names 2>/dev/null))' ;;
-        juicy|ji) _arguments '--limit[max findings]:count:' '--kind[kinds]:kinds:' \
+        juicy|ji) _tacu_args '--limit[max findings]:count:' '--kind[kinds]:kinds:' \
           '--grep[value text]:text:' \
           '1:dataset:($(command ticu __data-names 2>/dev/null))' \
           '*:question:' ;;
@@ -263,11 +273,11 @@ _tacu() {
         compadd -Q -d backup_action_descs -a backup_actions
         return
       fi
-      case $words[3] in
-        create|save) _arguments '--include-artifacts[also store raw command output]' '1:folder or archive:_files' ;;
-        list|ls) _arguments '1:folder:_directories' ;;
-        show|inspect) _arguments '1:archive:_files -g "*.tar.gz"' ;;
-        restore) _arguments '--merge[keep local data; add only what is missing]' '--yes[skip confirmation]' \
+      _tacu_depth=2; case $words[3] in
+        create|save) _tacu_args '--include-artifacts[also store raw command output]' '1:folder or archive:_files' ;;
+        list|ls) _tacu_args '1:folder:_directories' ;;
+        show|inspect) _tacu_args '1:archive:_files -g "*.tar.gz"' ;;
+        restore) _tacu_args '--merge[keep local data; add only what is missing]' '--yes[skip confirmation]' \
           '--no-safety-copy[do not snapshot current state first]' '1:archive:_files -g "*.tar.gz"' ;;
       esac
       ;;
@@ -279,24 +289,24 @@ _tacu() {
       hist_action_descs=('show turns' 'filter turns' 'alias for search')
       if (( CURRENT == 3 )); then
         compadd -Q -d hist_action_descs -a hist_actions
-        _arguments '--list[list only]'
+        _tacu_args '--list[list only]'
         return
       fi
-      case $words[3] in
+      _tacu_depth=2; case $words[3] in
         search|find) _message 'search text' ;;
         list) ;;
       esac
       ;;
     run)
-      _arguments \
+      _tacu_args \
         '-q[question to answer from command stdout]:question:' \
         '--shell[run COMMAND through a shell]' \
         '*::command:_command'
       ;;
-    inspect) _arguments '--shell[use a shell]' '*::command:_command' ;;
-    docker) _arguments '1:container:' '-q[question]:question:' '*::command:_command' ;;
-    health|doctor) _arguments '--json[JSON output]' '--workspace=[workspace]:directory:_directories' ;;
-    setup) _arguments '--workspace=[workspace]:directory:_directories' '--use-current[use cwd]' '--skip-models[skip model pull]' '--force[re-run setup]' ;;
+    inspect) _tacu_args '--shell[use a shell]' '*::command:_command' ;;
+    docker) _tacu_args '1:container:' '-q[question]:question:' '*::command:_command' ;;
+    health|doctor) _tacu_args '--json[JSON output]' '--workspace=[workspace]:directory:_directories' ;;
+    setup) _tacu_args '--workspace=[workspace]:directory:_directories' '--use-current[use cwd]' '--skip-models[skip model pull]' '--force[re-run setup]' ;;
     *) _files ;;
   esac
 }
@@ -761,9 +771,16 @@ def bash_completion() -> str:
   if [[ ${{COMP_WORDS[1]}} == config && ${{COMP_WORDS[2]}} == update ]]; then COMPREPLY=( $(compgen -W "--model --context-turns" -- "$current") ); return; fi
   if [[ ${{COMP_WORDS[1]}} == model && $COMP_CWORD -eq 2 ]]; then COMPREPLY=( $(compgen -W "current list use reset" -- "$current") ); return; fi
   if [[ ${{COMP_WORDS[1]}} == workspace && $COMP_CWORD -eq 2 ]]; then COMPREPLY=( $(compgen -W "show enter create use" -- "$current") ); return; fi
-  if [[ ${{COMP_WORDS[1]}} == tools && ${{COMP_WORDS[2]}} == map ]]; then COMPREPLY=( $(compgen -W "--depth --symbols --max-files --json" -- "$current") ); return; fi
-  if [[ ${{COMP_WORDS[1]}} == tools && ${{COMP_WORDS[2]}} == find ]]; then COMPREPLY=( $(compgen -W "--type --case-sensitive --case-insensitive --max-results --json" -- "$current") ); return; fi
-  if [[ ${{COMP_WORDS[1]}} == tools && ${{COMP_WORDS[2]}} == search ]]; then COMPREPLY=( $(compgen -W "--regex --case-sensitive --case-insensitive --glob --max-results --json" -- "$current") ); return; fi
+  # map WHERE · find NAME WHERE · search TEXT WHERE: the directory position gets
+  # directories, flags get flags, and the free-text positions get nothing.
+  if [[ ${{COMP_WORDS[1]}} == tools && ${{COMP_WORDS[2]}} == map ]]; then
+    if [[ $current == -* ]]; then COMPREPLY=( $(compgen -W "--depth --symbols --max-files --json" -- "$current") ); elif [[ $COMP_CWORD -eq 3 ]]; then COMPREPLY=( $(compgen -d -- "$current") ); fi; return; fi
+  if [[ ${{COMP_WORDS[1]}} == tools && ${{COMP_WORDS[2]}} == find ]]; then
+    if [[ $current == -* ]]; then COMPREPLY=( $(compgen -W "--type --case-sensitive --case-insensitive --max-results --json" -- "$current") ); elif [[ $COMP_CWORD -eq 4 ]]; then COMPREPLY=( $(compgen -d -- "$current") ); fi; return; fi
+  if [[ ${{COMP_WORDS[1]}} == tools && ${{COMP_WORDS[2]}} == search ]]; then
+    if [[ $current == -* ]]; then COMPREPLY=( $(compgen -W "--regex --case-sensitive --case-insensitive --glob --max-results --json" -- "$current") ); elif [[ $COMP_CWORD -eq 4 ]]; then COMPREPLY=( $(compgen -d -- "$current") ); fi; return; fi
+  if [[ ${{COMP_WORDS[1]}} == juicy || ( ${{COMP_WORDS[1]}} == extract && ${{COMP_WORDS[2]}} == juicy ) ]]; then
+    if [[ $current == -* ]]; then COMPREPLY=( $(compgen -W "--format -o --output --min-confidence --kind --grep --ask --reports --resume --all-files" -- "$current") ); elif [[ $previous == -o || $previous == --output || $previous == --reports ]]; then COMPREPLY=( $(compgen -f -- "$current") ); else COMPREPLY=( $(compgen -f -- "$current") ); fi; return; fi
   if [[ ${{COMP_WORDS[1]}} == tools && ${{COMP_WORDS[2]}} == read ]]; then
     if [[ $current == -* ]]; then COMPREPLY=( $(compgen -W "--start --end --json" -- "$current") ); else COMPREPLY=( $(compgen -f -- "$current") ); fi
     return

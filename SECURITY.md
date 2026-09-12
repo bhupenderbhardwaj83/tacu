@@ -26,6 +26,8 @@ User data belongs in `~/.local/share/tacu/` (or `%LOCALAPPDATA%\tacu` on Windows
 | Host mutations | Kill, brew, service, docker start/stop require `ti do` |
 | Secrets in argv | Redacted in audit; operations that look like exfil are blocked or prompted |
 | `ti web` fetch | HTTP(S), no credentials in URL, public addresses only, GET, no cookies |
+| `email` | Static: nothing in the message is executed, rendered, fetched or connected to. `parse_message(raw)` has no transport parameter; `enrich(iocs: strings, …)` cannot receive the message or attachment bytes — both held by tests. HTML tag-stripped, never rendered. Attachments hashed and magic-typed in memory; archives inventoried from the central directory, never extracted; nothing written to disk. URLs defanged in all output. Reputation lookups are about the mail's addresses and domains, from third parties, never to them |
+| `recon` | GET-only; DNS-to-socket pinning; private, loopback and link-local targets refused before any request; every contacted service listed in the answer; not offered to the `ti ask` lookup loop (checked at build, not by convention); cookie values never recorded; reputation keys sent as headers only, stored 0600, never on argv or in the audit log |
 
 TACU does not store an administrator password or maintain a sudo keepalive.
 

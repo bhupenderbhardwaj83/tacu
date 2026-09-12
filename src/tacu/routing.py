@@ -395,6 +395,121 @@ CAPABILITIES: tuple[Capability, ...] = (
                 "backdoor listening", "who can reach my machine"),
                ("exposed", "reachable"),
                "Listening sockets with the owning process, separating loopback from exposed"),
+    # External reconnaissance. These always name a domain or public address the
+    # user is checking, never this machine — which is what separates them from
+    # network/forensics, and why every one of them is outbound.
+    Capability("recon", "sweep",
+               ("what is behind", "what's behind", "whats behind", "recon on", "recon of", "recon for",
+                "reconnaissance", "investigate this domain", "investigate domain", "profile this domain",
+                "profile domain", "everything about this domain", "everything about the domain",
+                "tell me about this domain", "look up this domain", "lookup this domain",
+                "full check on", "risk score for", "risk score of", "how risky is",
+                "is this domain safe", "is this ip safe", "is this site safe", "check this domain",
+                "check the domain", "check this ip", "check the ip", "analyse this domain",
+                "analyze this domain", "footprint of", "attack surface of"),
+               ("recon", "reconnaissance", "domain", "footprint", "risk"),
+               "External recon of a domain or address: subdomains, DNS, TLS, WAF/CDN, ASN, geo, reputation, score"),
+    Capability("recon", "subdomains",
+               ("subdomains of", "subdomains for", "subdomain of", "list subdomains", "find subdomains",
+                "enumerate subdomains", "subdomain enumeration", "discover subdomains",
+                "certificate transparency", "crt.sh", "what subdomains", "which subdomains",
+                "hosts under", "names under"),
+               ("subdomain", "subdomains", "enumeration"),
+               "Subdomains from certificate transparency and DNS"),
+    Capability("recon", "dns",
+               ("dns records of", "dns records for", "dns for", "dns of", "a record", "aaaa record",
+                "cname of", "cname for", "cname chain", "mx records", "mx record", "ns records",
+                "nameservers of", "nameservers for", "name servers for", "txt records",
+                "what does it resolve to", "resolve the domain", "reverse dns of", "ptr record"),
+               ("dns", "cname", "mx", "nameserver", "nameservers", "ptr", "txt"),
+               "DNS records, CNAME chain, addresses and reverse DNS for a domain"),
+    Capability("recon", "tls",
+               ("certificate of", "certificate for", "tls certificate", "ssl certificate", "ssl cert",
+                "tls cert", "cert for", "cert of", "who issued the certificate", "certificate issuer",
+                "certificate expiry", "when does the certificate expire", "cert expire",
+                "san names", "subject alternative", "tls version of", "certificate fingerprint"),
+               ("certificate", "cert", "tls", "ssl", "issuer", "san", "fingerprint"),
+               "TLS certificate: issuer, subject, SANs, validity, version, fingerprint"),
+    Capability("recon", "http",
+               ("http headers of", "http headers for", "response headers of", "response headers for",
+                "server header", "what server header", "http fingerprint", "probe the site",
+                "probe this site", "http probe"),
+               ("headers", "header", "probe"),
+               "HTTP response status, headers and cookies from one request"),
+    Capability("recon", "waf",
+               ("behind cloudflare", "behind akamai", "behind a cdn", "behind a waf", "uses cloudflare",
+                "using cloudflare", "using akamai", "using a cdn", "which cdn", "what cdn", "which waf",
+                "what waf", "waf in front", "cdn in front", "is it behind", "fronted by",
+                "waf detection", "cdn detection", "detect the waf", "detect the cdn",
+                "web application firewall", "is there a waf", "is there a cdn"),
+               ("waf", "cdn", "cloudflare", "akamai", "fastly", "imperva", "cloudfront", "firewall"),
+               "WAF/CDN provider scored across CNAME, headers, cookies, ASN and certificate"),
+    Capability("recon", "asn",
+               ("asn of", "asn for", "as number", "autonomous system", "which asn", "what asn",
+                "who owns this ip", "who owns the ip", "network owner of", "who hosts this",
+                "who is hosting this", "hosting provider of", "hosting provider for", "isp of",
+                "isp for", "which isp", "what network is", "prefix of", "cidr of"),
+               ("asn", "autonomous", "isp", "owner", "prefix", "cidr", "hosting"),
+               "Origin AS, prefix, registry, allocation date and owner for an address"),
+    Capability("recon", "geo",
+               ("where is this ip", "where is the ip", "location of this ip", "location of the ip",
+                "located", "where is", "physically", "hosted in which",
+                "geolocate", "geolocation", "geo location", "ip location", "which country is",
+                "what country is", "where is this server", "where is the server", "where is it hosted",
+                "where is this domain hosted", "city of this ip"),
+               ("geolocation", "geolocate", "location", "country", "city", "region"),
+               "Country, region, city and organisation for an address"),
+    Capability("recon", "reputation",
+               ("reputation of", "reputation for", "ip reputation", "domain reputation", "is this ip malicious",
+                "is the ip malicious", "is this ip bad", "is this domain malicious", "abuseipdb",
+                "abuse ipdb", "virustotal", "virus total", "threat intel on", "threat intelligence on",
+                "is it blacklisted", "is this blacklisted", "blocklisted", "reported for abuse",
+                "abuse reports for", "abuse score", "malicious ip", "malicious domain"),
+               ("reputation", "abuseipdb", "virustotal", "malicious", "blacklisted", "abuse", "threat"),
+               "AbuseIPDB and VirusTotal findings for an address, raw, with a computed score"),
+    # Email forensics. A saved message is the subject; nothing in it is ever
+    # contacted, so these are read-only even though enrichment goes out.
+    Capability("email", "analyze",
+               ("is this email phishing", "is this email a phish", "is this a phishing email",
+                "is this email legit", "is this email legitimate", "is this email safe",
+                "is this email real", "analyze this email", "analyse this email", "analyze the email",
+                "analyse the email", "analyze this eml", "analyse this eml", "check this email",
+                "check the email", "check this eml", "scan this email", "scan the email",
+                "email forensics", "email analysis", "inspect this email", "investigate this email",
+                "is this message phishing", "phishing check", "spoofed email", "is this spoofed",
+                "who really sent this", "where did this email come from", "where did this email really"),
+               ("email", "eml", "phishing", "phish", "spoofed", "spoof", "message"),
+               "Static email forensics: headers, hops, authentication alignment, IOCs, attachments, score"),
+    Capability("email", "headers",
+               ("email headers", "headers of this email", "headers of the email", "mail headers",
+                "check the headers", "analyze the headers", "analyse the headers", "header analysis",
+                "who is the real sender", "real sender of"),
+               ("headers", "header", "email", "eml"),
+               "Email headers, anomalies and authentication results"),
+    Capability("email", "auth",
+               ("spf dkim dmarc", "spf and dkim", "dkim and dmarc", "did spf pass", "did dkim pass",
+                "did dmarc pass", "dmarc result", "dkim result", "spf result", "authentication results",
+                "is the sender authenticated", "email authentication"),
+               ("spf", "dkim", "dmarc", "arc", "authentication", "email", "eml"),
+               "SPF, DKIM, DMARC and ARC results, and whether they align with the displayed sender"),
+    Capability("email", "hops",
+               ("received chain", "received headers", "mail hops", "email hops", "hops of this email",
+                "path this email took", "route this email took", "which servers handled",
+                "trace this email", "trace the email", "originating ip of this email"),
+               ("received", "hops", "hop", "relay", "email", "eml"),
+               "The Received chain as hops with PTR, ASN and country"),
+    Capability("email", "iocs",
+               ("iocs in this email", "iocs from this email", "indicators in this email",
+                "extract iocs", "extract indicators", "urls in this email", "links in this email",
+                "links in the email", "domains in this email", "ips in this email"),
+               ("ioc", "iocs", "indicators", "email", "eml", "links", "urls"),
+               "URLs, domains, IPs, addresses and hashes from a message, defanged and never visited"),
+    Capability("email", "attachments",
+               ("attachments in this email", "attachment in this email", "email attachments",
+                "is the attachment safe", "is this attachment safe", "check the attachment",
+                "check the attachments", "what is the attachment", "inspect the attachment"),
+               ("attachment", "attachments", "email", "eml"),
+               "Attachments typed by content, hashed, archives inventoried; nothing opened"),
     Capability("network", "connections",
                ("tcp connection", "established connection", "connections established", "outbound connection",
                 "destination port", "destination ports", "top destinations", "foreign address",
@@ -1546,6 +1661,11 @@ def _usable_app_name(token: str | None) -> str | None:
     words = token.casefold().split()
     if not words or len(token) <= 2:
         return None
+    if _IPV4_SHAPED.match(token) or ("." in token and _looks_like_a_domain(token)):
+        # 140.82.112.25 and github.com have the shape of a name and are not
+        # applications; treating them as one sent "where is 140.82.112.25" to
+        # the bundle finder.
+        return None
     if words[-1] in _NOT_AN_APP_TAIL or token.casefold() in _APP_NAME_STOPWORDS:
         return None
     return token
@@ -2116,6 +2236,23 @@ def score_capability(intent: str, capability: Capability) -> int:
     if hits:
         score += 12 * hits
     domain = intent_host_domain(intent)
+    if capability.tool == "email":
+        named = any(name.casefold().endswith((".eml", ".msg", ".mbox", ".email"))
+                    for name in _filenames_from_intent(intent))
+        if not named:
+            return 0
+        return score + (30 if hits else 0) + 20
+    if capability.tool == "recon":
+        # Recon is about something *out there*, so the question naming a domain
+        # or public address is the strongest signal it carries — stronger than
+        # any phrasing. Without one there is nothing to look at, and an outbound
+        # lookup must never be about a guess.
+        named = _host_from_intent(intent)
+        if not named:
+            return 0
+        if hits:
+            score += 30
+        return score
     if capability.tool == "forensics" and phrase_hit:
         # A forensic question names the thing at risk — git, docker, aws credentials —
         # without being a question about that tool. Its own phrasing decides it.
@@ -2773,6 +2910,26 @@ def _native_steps_for_intent(intent: str, *, include_host_mutate: bool = False,
             if not host:
                 continue
             inputs["host"] = host
+        if capability.tool == "recon":
+            # No target, no recon: an outbound lookup must be about something the
+            # user named, never about a guess.
+            if not host:
+                continue
+            inputs["target"] = host
+            inputs.pop("limit", None)
+        if capability.tool == "email":
+            # The message must be named. Without a file there is nothing to read,
+            # and guessing one would read the wrong mail. And one step only: the
+            # operations share their entities, so a question about headers also
+            # scored analyze and auth, and the plan read the same file three times.
+            if any(step.get("tool") == "email" for step in steps):
+                continue
+            named = next((name for name in _filenames_from_intent(intent)
+                          if name.casefold().endswith((".eml", ".msg", ".mbox", ".txt", ".email"))), None)
+            if not named:
+                continue
+            inputs["path"] = named
+            inputs.pop("limit", None)
         if capability.operation in {"open_files", "tree", "inspect", "process_signature"} and pid is not None:
             inputs["pid"] = pid
         if capability.operation == "open_files" and pid is None:

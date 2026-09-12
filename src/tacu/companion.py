@@ -934,6 +934,410 @@ def _connection_answer(query: str, facts: dict[str, Any]) -> str | None:
 _SEVERITY_LABEL = {"high": "HIGH", "investigate": "INVESTIGATE", "review": "REVIEW"}
 
 
+def _recon_answer(data: dict[str, Any]) -> str | None:
+    """Render a recon result: findings first, then the score's working, then what went out.
+
+    Nothing here is summarised into a verdict. A provider match shows the
+    indicators that produced it; a risk level shows every contribution; a source
+    that was not consulted is named as such. The reader can disagree with any
+    line and see exactly what it rested on.
+    """
+
+    operation = data.get("operation")
+    target = data.get("target") or ""
+    lines: list[str] = []
+
+    def waf_lines(waf: dict[str, Any], indent: str = "") -> None:
+        providers = waf.get("providers") or []
+        if not providers:
+            lines.append(f"{indent}WAF/CDN: no indicators seen")
+            return
+        top = providers[0]
+        lines.append(f"{indent}WAF/CDN: {top['provider']} · {top['confidence']}% confidence "
+                     f"from {len(top['indicators'])} indicator"
+                     f"{'s' if len(top['indicators']) != 1 else ''}")
+        for item in top["indicators"]:
+            lines.append(f"{indent}    {item['kind']:7} +{item['weight']:<3} {item['evidence'][:90]}")
+        for other in providers[1:3]:
+            lines.append(f"{indent}    also {other['provider']} at {other['confidence']}%")
+
+    def risk_lines(risk: dict[str, Any]) -> None:
+        lines.append(f"RISK {risk['score']:+d} · {risk['level']}")
+        for item in risk.get("contributions") or []:
+            lines.append(f"    {item['weight']:+4d}  {item['why']}")
+        if not risk.get("contributions"):
+            lines.append("    nothing observed that adds to or lowers the score")
+        for note in risk.get("not_checked") or []:
+            lines.append(f"    not checked: {note}")
+
+    def asn_line(asn: dict[str, Any]) -> str:
+        if not asn.get("asn"):
+            return f"ASN: {asn.get('note') or 'unknown'}"
+        return (f"AS{asn['asn']} {asn.get('owner') or ''} · {asn.get('prefix')} · "
+                f"{asn.get('registry', '').upper()} {asn.get('country')} · allocated {asn.get('allocated')}")
+
+    if operation == "sweep":
+        lines.append(f"RECON {target}")
+        subs = data.get("subdomains") or {}
+        if subs:
+            names = subs.get("subdomains") or []
+            head = f"{subs.get('count', len(names))} name(s) beneath {target}"
+            if not subs.get("ct_available"):
+                head += " — certificate transparency was unavailable, so this is DNS only"
+            lines.append(head + ":")
+            for item in names[:12]:
+                lines.append(f"    {item['name']}  ({', '.join(item['sources'])})")
+            if subs.get("truncated") or len(names) > 12:
+                lines.append(f"    … {max(0, subs.get('count', 0) - 12)} more; ask for subdomains with a higher limit")
+        # Names that resolve come first and in full; names that do not are a
+        # fact worth one line between them — a certificate was once issued for
+        # a host that no longer answers — not a block each.
+        hosts = data.get("hosts") or []
+        live = [h for h in hosts if (h.get("dns") or {}).get("addresses")]
+        dead = [h["host"] for h in hosts if not (h.get("dns") or {}).get("addresses")]
+        if dead:
+            lines.append(f"    no address today: {', '.join(dead[:8])}"
+                         + (f" … +{len(dead) - 8}" if len(dead) > 8 else "")
+                         + "  (in certificate logs, not in DNS)")
+        for host in live[:4]:
+            lines.append("")
+            lines.append(f"{host['host']}")
+            dns = host.get("dns") or {}
+            addresses = ", ".join(a["ip"] + ("" if a["public"] else " (private)")
+                                  for a in dns.get("addresses") or [])
+            lines.append(f"    resolves to {addresses}")
+            if dns.get("cname_chain"):
+                lines.append(f"    via CNAME {' → '.join(dns['cname_chain'])}")
+            if host.get("skipped"):
+                lines.append(f"    {host['skipped']}")
+                continue
+            if host.get("asn"):
+                lines.append(f"    {asn_line(host['asn'])}")
+            tls = host.get("tls") or {}
+            if tls.get("issuer"):
+                lines.append(f"    TLS {tls.get('tls_version')} · issued by {_short_dn(tls['issuer'])} · "
+                             f"valid to {str(tls.get('not_after', ''))[:10]}")
+            elif tls.get("note"):
+                lines.append(f"    TLS: {tls['note']}")
+            http = host.get("http") or {}
+            if http.get("status"):
+                server = next((h.split(':', 1)[1].strip() for h in http.get("headers", [])
+                               if h.casefold().startswith("server:")), "")
+                lines.append(f"    HTTP {http['status']}" + (f" · server: {server}" if server else ""))
+            if host.get("waf"):
+                waf_lines(host["waf"], indent="    ")
+        geo = data.get("geo") or {}
+        if geo.get("country"):
+            lines.append("")
+            lines.append(f"Location of {geo.get('ip')}: {', '.join(p for p in (geo.get('city'), geo.get('region'), geo.get('country')) if p)}"
+                         + (f" · {geo['org']}" if geo.get("org") else ""))
+        rep = data.get("reputation") or {}
+        if rep.get("abuseipdb") or rep.get("virustotal"):
+            lines.append("")
+            ab = rep.get("abuseipdb")
+            if ab:
+                lines.append(f"AbuseIPDB: {ab['confidence']}% abuse confidence from {ab['reports']} report(s)"
+                             + (f", last {ab['last_reported'][:10]}" if ab.get('last_reported') else "")
+                             + (" · Tor exit" if ab.get('tor') else ""))
+            vt = rep.get("virustotal")
+            if vt:
+                lines.append(f"VirusTotal: {vt['malicious']} malicious, {vt['suspicious']} suspicious, "
+                             f"{vt['harmless']} harmless, {vt['undetected']} undetected")
+        if data.get("risk"):
+            lines.append("")
+            risk_lines(data["risk"])
+    elif operation == "subdomains":
+        names = data.get("subdomains") or []
+        head = f"{data.get('count', len(names))} name(s) beneath {target}"
+        if not data.get("ct_available"):
+            head += " — certificate transparency was unavailable, so this is DNS only"
+        lines.append(head + ":")
+        for item in names:
+            lines.append(f"    {item['name']}  ({', '.join(item['sources'])})")
+        if data.get("truncated"):
+            lines.append("    … more exist; raise the limit to see them")
+    elif operation == "dns":
+        lines.append(f"DNS for {target}:")
+        for a in data.get("addresses") or []:
+            lines.append(f"    {a['ip']}" + ("" if a["public"] else "  (private address)"))
+        if data.get("cname_chain"):
+            lines.append(f"    CNAME {' → '.join(data['cname_chain'])}")
+        for key in ("ns", "mx", "txt", "ptr"):
+            for value in (data.get(key) or [])[:6]:
+                lines.append(f"    {key.upper():4} {value[:120]}")
+    elif operation == "tls":
+        lines.append(f"TLS certificate for {target}:")
+        lines.append(f"    subject   {_short_dn(data.get('subject', ''))}")
+        lines.append(f"    issuer    {_short_dn(data.get('issuer', ''))}")
+        lines.append(f"    valid     {str(data.get('not_before', ''))[:10]} → {str(data.get('not_after', ''))[:10]}")
+        lines.append(f"    protocol  {data.get('tls_version')} · {data.get('cipher')}")
+        san = data.get("san") or []
+        if san:
+            lines.append(f"    SAN       {', '.join(san[:8])}" + (f" … +{len(san) - 8}" if len(san) > 8 else ""))
+        lines.append(f"    sha256    {data.get('sha256', '')}")
+    elif operation == "http":
+        lines.append(f"HTTP {data.get('status')} from {data.get('url')}:")
+        for header in (data.get("headers") or [])[:20]:
+            lines.append(f"    {header[:140]}")
+        if data.get("cookies"):
+            lines.append(f"    cookies: {', '.join(c.split('=', 1)[0] for c in data['cookies'][:8])}")
+    elif operation == "waf":
+        lines.append(f"{target}:")
+        waf_lines(data, indent="    ")
+    elif operation == "asn":
+        lines.append(f"{data.get('ip')}" + (f" (from {data['resolved_from']})" if data.get("resolved_from") else "") + ":")
+        lines.append(f"    {asn_line(data)}")
+    elif operation == "geo":
+        where = ", ".join(p for p in (data.get("city"), data.get("region"), data.get("country")) if p)
+        lines.append(f"{data.get('ip')}" + (f" (from {data['resolved_from']})" if data.get("resolved_from") else "") + f": {where or 'no location returned'}")
+        if data.get("org"):
+            lines.append(f"    {data['org']}")
+        if data.get("hostname"):
+            lines.append(f"    reverse name {data['hostname']}")
+    elif operation == "reputation":
+        lines.append(f"Reputation of {data.get('ip')}" + (f" (from {data['resolved_from']})" if data.get("resolved_from") else "") + ":")
+        ab = data.get("abuseipdb")
+        if ab:
+            lines.append(f"    AbuseIPDB: {ab['confidence']}% abuse confidence from {ab['reports']} report(s)"
+                         + (f", last {ab['last_reported'][:10]}" if ab.get('last_reported') else "")
+                         + (f" · {ab['usage_type']}" if ab.get('usage_type') else ""))
+        vt = data.get("virustotal")
+        if vt:
+            lines.append(f"    VirusTotal: {vt['malicious']} malicious, {vt['suspicious']} suspicious, "
+                         f"{vt['harmless']} harmless, {vt['undetected']} undetected")
+        for note in data.get("not_checked") or []:
+            lines.append(f"    not checked: {note}")
+        if not ab and not vt:
+            lines.append("    No reputation source answered. Add keys with: ti config keys")
+    else:
+        return None
+
+    contacted = data.get("contacted") or []
+    if contacted:
+        lines.append("")
+        lines.append("Contacted: " + ", ".join(contacted))
+    for note in data.get("notes") or []:
+        lines.append(f"Note: {note}")
+    return "\n".join(lines)
+
+
+def _email_answer(data: dict[str, Any]) -> str | None:
+    """Render an email analysis: the score and its reasons first, then the evidence.
+
+    Every section shows what it rests on. The authentication block says *for
+    whom* each check passed, because "SPF pass" for the attacker's domain is
+    the most common shape a spoof takes, and reading it as reassurance is the
+    mistake this tool exists to prevent.
+    """
+
+    operation = data.get("operation")
+    lines: list[str] = []
+    rule = "─" * 34
+
+    def auth_block(auth: dict[str, Any], sender: dict[str, Any]) -> None:
+        lines.append("Authentication")
+        lines.append(rule)
+        for method in ("spf", "dkim", "dmarc", "arc"):
+            verdict = str(auth.get(method, "none")).upper()
+            for_whom = ""
+            if method == "spf" and auth.get("spf_domain"):
+                for_whom = f"   for {auth['spf_domain']}"
+            elif method == "dkim" and auth.get("dkim_domains"):
+                for_whom = f"   for {', '.join(auth['dkim_domains'])}"
+            elif method == "dmarc" and auth.get("dmarc_domain"):
+                for_whom = f"   for {auth['dmarc_domain']}"
+            lines.append(f"{method.upper():8} {verdict:8}{for_whom}")
+        notes = [n for n in auth.get("notes") or [] if "not for the displayed" in n]
+        if notes:
+            lines.append("")
+            lines.append("Important:")
+            for note in notes:
+                lines.append(f"  {note}")
+            lines.append(f"  The passes above are not for the identity the recipient sees ({sender.get('address')}).")
+
+    def hops_table(hops: list[dict[str, Any]], enriched: list[dict[str, Any]]) -> None:
+        by_ip = {row["ip"]: row for row in enriched or []}
+        lines.append("Received chain (oldest first)")
+        lines.append(rule)
+        lines.append(f"{'Hop':4} {'Source IP':16} {'PTR / relay':34} {'ASN':9} {'Country':7}")
+        for hop in hops:
+            ip = hop.get("ip") or "--"
+            row = by_ip.get(hop.get("ip") or "")
+            ptr = ""
+            if row and row.get("ptr"):
+                ptr = row["ptr"][0]
+            elif hop.get("relay"):
+                ptr = hop["relay"]
+            else:
+                ptr = hop.get("from") or "--"
+            asn = f"AS{row['asn']['asn']}" if row and (row.get("asn") or {}).get("asn") else "--"
+            country = (row or {}).get("asn", {}).get("country") or "--"
+            if hop.get("ip") and not hop.get("ip_public"):
+                asn, country = "--", "private"
+            lines.append(f"{hop.get('hop', '?'):<4} {ip:16} {ptr[:34]:34} {asn:9} {country:7}")
+        for row in enriched or []:
+            rep = row.get("reputation") or {}
+            ab, vt = rep.get("abuseipdb"), rep.get("virustotal")
+            if ab or vt:
+                lines.append(f"     {row['ip']}: "
+                             + (f"AbuseIPDB {ab['confidence']}% from {ab['reports']} report(s)" if ab else "")
+                             + (f"; VirusTotal {vt['malicious']} malicious" if vt else ""))
+
+    if operation == "analyze":
+        risk = data.get("risk") or {}
+        headers = data.get("headers") or {}
+        sender = headers.get("from") or {}
+        lines.append(f"EMAIL RISK SCORE: {risk.get('score', 0)} / 100")
+        lines.append(f"SEVERITY: {risk.get('level', 'NONE OBSERVED')}")
+        lines.append("")
+        lines.append(f"From:      {sender.get('display', '')} <{sender.get('address', '')}>".rstrip())
+        if (headers.get("reply_to") or {}).get("address"):
+            lines.append(f"Reply-To:  {headers['reply_to']['address']}")
+        lines.append(f"Subject:   {headers.get('subject', '')}")
+        if headers.get("date_utc"):
+            lines.append(f"Date:      {headers['date_utc']}")
+        lines.append("")
+        lines.append("Primary reasons")
+        lines.append(rule)
+        for reason in risk.get("reasons") or []:
+            lines.append(f"{reason['weight']:+4d}  {reason['why']}")
+        if not risk.get("reasons"):
+            lines.append("  nothing observed that adds to the score")
+        lines.append("")
+        auth_block(data.get("auth") or {}, sender)
+        lines.append("")
+        hops_table(headers.get("hops") or [], (data.get("enrichment") or {}).get("hops") or [])
+        anomalies = [a for a in headers.get("anomalies") or [] if not a.startswith(("Reply-To", "display name"))]
+        if anomalies:
+            lines.append("")
+            lines.append("Header anomalies")
+            lines.append(rule)
+            for item in anomalies:
+                lines.append(f"  {item}")
+        dns = (data.get("enrichment") or {}).get("sender_dns") or {}
+        age = (data.get("enrichment") or {}).get("domain_age") or {}
+        if dns or age:
+            lines.append("")
+            lines.append(f"Sender domain {sender.get('domain', '')}")
+            lines.append(rule)
+            if age.get("registered") is False:
+                lines.append("  registration: none — the registry reports no such domain")
+            elif age.get("created"):
+                lines.append(f"  registered:   {str(age['created'])[:10]} ({age.get('age_days')} days ago)")
+            elif age.get("note"):
+                lines.append(f"  registration: {age['note']}")
+            if dns:
+                lines.append(f"  MX:           {', '.join(dns.get('mx') or []) or 'none'}")
+                lines.append(f"  SPF record:   {dns.get('spf_record') or 'none'}")
+                lines.append(f"  DMARC:        {(dns.get('dmarc_record') or 'none')[:80]}"
+                             + (f"  (p={dns['dmarc_policy']})" if dns.get("dmarc_policy") else ""))
+                for selector, state in (dns.get("dkim_selectors") or {}).items():
+                    lines.append(f"  DKIM key:     {selector} {state}")
+        iocs = data.get("iocs") or {}
+        if iocs.get("urls") or iocs.get("anchors"):
+            lines.append("")
+            lines.append("Links (defanged; none were visited)")
+            lines.append(rule)
+            for anchor in iocs.get("anchors") or []:
+                lines.append(f"  ! {anchor['finding']}")
+            for url in (iocs.get("urls") or [])[:12]:
+                flags = f"   ← {'; '.join(url['flags'])}" if url.get("flags") else ""
+                lines.append(f"  {url['url'][:100]}{flags}")
+            reps = (data.get("enrichment") or {}).get("urls") or {}
+            for host, rep in list(reps.items())[:8]:
+                if isinstance(rep, dict) and "malicious" in rep:
+                    lines.append(f"     {host}: VirusTotal {rep['malicious']} malicious, {rep['harmless']} harmless")
+        attachments = data.get("attachments") or []
+        if attachments:
+            lines.append("")
+            lines.append("Attachments (typed by content; none were opened)")
+            lines.append(rule)
+            hashes = (data.get("enrichment") or {}).get("hashes") or {}
+            for item in attachments:
+                lines.append(f"  {item['filename']}  {item['size']:,} bytes · declared {item['declared_type']} · "
+                             f"actually {item['actual_label']}")
+                for flag in item.get("flags") or []:
+                    lines.append(f"      ! {flag}")
+                for entry in (item.get("archive") or {}).get("entries") or []:
+                    lines.append(f"      ├ {entry['name']}  {entry['size']:,} bytes"
+                                 + ("  (encrypted)" if entry.get("encrypted") else ""))
+                if item.get("sha256"):
+                    lines.append(f"      sha256 {item['sha256']}")
+                    rep = hashes.get(item["sha256"])
+                    if isinstance(rep, dict) and rep.get("known"):
+                        lines.append(f"      VirusTotal: {rep['malicious']} malicious, {rep['suspicious']} suspicious")
+        if risk.get("not_checked"):
+            lines.append("")
+            for note in risk["not_checked"]:
+                lines.append(f"Not checked: {note}")
+    elif operation in {"headers", "auth"}:
+        headers = data.get("headers") or {}
+        sender = headers.get("from") or data.get("from") or {}
+        if headers:
+            lines.append(f"From:      {sender.get('display', '')} <{sender.get('address', '')}>".rstrip())
+            for key, label in (("reply_to", "Reply-To"), ("return_path", "Return-Path")):
+                if (headers.get(key) or {}).get("address"):
+                    lines.append(f"{label + ':':10} {headers[key]['address']}")
+            lines.append(f"Message-ID: {headers.get('message_id', '')}")
+            lines.append(f"Date:      {headers.get('date', '')}")
+            if headers.get("user_agent"):
+                lines.append(f"Mailer:    {headers['user_agent']}")
+            for item in headers.get("anomalies") or []:
+                lines.append(f"  ! {item}")
+            lines.append("")
+        auth_block(data.get("auth") or {}, sender)
+        if operation == "headers" and headers.get("hops"):
+            lines.append("")
+            hops_table(headers["hops"], [])
+    elif operation == "hops":
+        hops_table(data.get("hops") or [], (data.get("enrichment") or {}).get("hops") or [])
+    elif operation == "iocs":
+        iocs = data.get("iocs") or {}
+        for key in ("urls", "domains", "ips", "addresses", "attachment_hashes"):
+            values = iocs.get(key) or []
+            if not values:
+                continue
+            lines.append(f"{key.replace('_', ' ').upper()} ({len(values)})")
+            for value in values[:40]:
+                if isinstance(value, dict):
+                    lines.append(f"  {value['url'][:110]}" + (f"   ← {'; '.join(value['flags'])}" if value.get("flags") else ""))
+                else:
+                    lines.append(f"  {_defang_text(value) if key in {'domains', 'ips'} else value}")
+        for anchor in iocs.get("anchors") or []:
+            lines.append(f"  ! {anchor['finding']}")
+        lines.append("")
+        lines.append("Defanged. Nothing above was visited or connected to.")
+    elif operation == "attachments":
+        for item in data.get("attachments") or []:
+            lines.append(f"{item['filename']}  {item['size']:,} bytes · declared {item['declared_type']} · actually {item['actual_label']}")
+            for flag in item.get("flags") or []:
+                lines.append(f"    ! {flag}")
+            for entry in (item.get("archive") or {}).get("entries") or []:
+                lines.append(f"    ├ {entry['name']}  {entry['size']:,} bytes" + ("  (encrypted)" if entry.get("encrypted") else ""))
+            if item.get("sha256"):
+                lines.append(f"    sha256 {item['sha256']}")
+        if not data.get("attachments"):
+            lines.append("No attachments.")
+    else:
+        return None
+
+    contacted = data.get("contacted") or []
+    lines.append("")
+    lines.append("Contacted: " + (", ".join(contacted) if contacted else "nothing — this was a static read"))
+    return "\n".join(lines)
+
+
+def _defang_text(value: str) -> str:
+    return value.replace(".", "[.]")
+
+
+def _short_dn(value: str) -> str:
+    """'O=Sectigo Limited, CN=…' → the organisation, else the common name."""
+
+    parts = dict(p.split("=", 1) for p in value.split(", ") if "=" in p) if value else {}
+    return parts.get("organizationName") or parts.get("O") or parts.get("commonName") or parts.get("CN") or value[:60]
+
+
 def _forensic_answer(data: dict[str, Any]) -> str | None:
     """Report what was found, why it matters, and what was not looked at."""
 
@@ -1053,6 +1457,14 @@ def exact_host_answer(question: str, results: list[dict[str, Any]]) -> str | Non
         result = item.get("result") or {}
         data = result.get("data") or {}
         tool = result.get("tool")
+        if tool == "email" or data.get("message_sha256"):
+            rendered = _email_answer(data)
+            if rendered:
+                return rendered
+        if tool == "recon" or (data.get("contacted") is not None and data.get("kind") in {"domain", "ip"}):
+            rendered = _recon_answer(data)
+            if rendered:
+                return rendered
         if data.get("operation") in {"sweep", "outbound", "listening", "persistence", "secret_access"} and (
                 data.get("findings") is not None or data.get("holders") is not None
                 or data.get("entries") is not None or data.get("concerning") is not None

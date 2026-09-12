@@ -65,8 +65,18 @@ def _ripgrep(binary: str, target: Path, query: str, regex: bool, case_sensitive:
     if completed.returncode not in {0, 1}:
         raise ToolFailure(completed.stderr.strip() or "ripgrep failed", code="search_failed")
     matches: list[dict[str, Any]] = []
-    for line in completed.stdout.splitlines():
-        event = json.loads(line)
+    # One JSON event per "\n", and only "\n". splitlines() also breaks on
+    # \x0b, \x0c, \x1c-\x1e, \x85 and U+2028/9, so a matched line holding
+    # one of those — a NEL in a text file did it — cut an event in two and
+    # the second half failed as an unterminated string.
+    for line in completed.stdout.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError as error:
+            raise ToolFailure(f"ripgrep produced a line that was not JSON: {error}",
+                              code="search_failed") from error
         if event.get("type") != "match":
             continue
         data = event["data"]

@@ -145,6 +145,25 @@ class WideningIsNotMatchingTests(unittest.TestCase):
         self.assertNotIn("launchd", self._answer())
 
 
+class RipgrepEventTests(unittest.TestCase):
+    """One JSON event per newline — and only per newline."""
+
+    def test_a_line_break_character_inside_a_match_does_not_split_the_event(self) -> None:
+        # U+0085 (NEL) in a matched line: splitlines() breaks on it, "\n" does not.
+        from unittest.mock import patch
+        from tacu.tools import search_code
+        import json, types
+
+        event = json.dumps({"type": "match", "data": {"path": {"text": "a.txt"}, "line_number": 1,
+                                                       "lines": {"text": "govt\u0085s VT=1\n"},
+                                                       "submatches": [{"match": {"text": "VT="}, "start": 8}]}})
+        fake = types.SimpleNamespace(returncode=0, stdout=event + "\n", stderr="")
+        with patch("tacu.tools.search_code.subprocess.run", return_value=fake):
+            out = search_code._ripgrep("/usr/bin/rg", Path("."), "VT=", False, False, 50, None)
+        self.assertEqual(out["count"], 1)
+        self.assertEqual(out["matches"][0]["match"], "VT=")
+
+
 class SayWhatWasRunTests(unittest.TestCase):
     """TACU held the exact command and made the user ask three times for it."""
 

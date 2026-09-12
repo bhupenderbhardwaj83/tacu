@@ -234,6 +234,102 @@ still refuses invented shell.
 
 ---
 
+## External recon
+
+The other direction: not "is this machine clean" but "what is behind that domain". Name a
+domain or a public address and TACU gathers what can be known from the outside — subdomains
+from certificate transparency and DNS, what each resolves to, the certificate it presents,
+the CDN or WAF in front of it, the network that owns the address, where it sits, and what
+reputation sources report — then scores it in the open.
+
+```sh
+ti auto what is behind example.com            # everything, correlated, with a risk score
+ti auto list subdomains of example.com
+ti auto is example.com behind cloudflare      # WAF/CDN, scored across five kinds of indicator
+ti auto who owns the ip 203.0.113.10          # origin AS, prefix, registry, allocation date
+ti auto is 203.0.113.10 malicious             # AbuseIPDB and VirusTotal, raw
+```
+
+```text
+    WAF/CDN: Cloudflare · 98% confidence from 5 indicators
+        header  +40  server: cloudflare
+        header  +45  cf-ray: a39c88575e341f68-DEL
+        cookie  +35  __cf_bm=…
+        asn     +40  13335
+        cname   +45  www.example.com.cdn.cloudflare.net
+
+RISK -10 · NONE OBSERVED
+     -10  fronted by Cloudflare: the address is shared with many unrelated customers
+    not checked: AbuseIPDB: no key (set TACU_ABUSEIPDB_KEY or ti config keys)
+Contacted: crt.sh, asn.cymru.com (DNS), tls://example.com:443, https://example.com, ipinfo.io
+```
+
+Two rules hold throughout. One indicator is never a finding — `Server: cloudflare` alone is
+40%, and a CNAME, headers, a cookie and the ASN agreeing is 98%, with each indicator listed.
+And a reputation source is evidence, never a verdict: an address behind a CDN hosts thousands
+of unrelated customers, so the score lists every contribution, including the ones that lower
+it, and names every source it could not consult.
+
+This is TACU's second outbound feature, after `ti web`. Every answer ends with the services
+that were contacted. A name that resolves to a private or loopback address is reported and
+never probed, so recon cannot be pointed at something inside your network. Discovery is
+passive — certificate logs and DNS — and the optional `bruteforce` pass tries a short list of
+common names by DNS only, and only when asked; use it on domains you are authorised to test.
+
+Reputation keys are stored by prompt, never on a command line: `ti config keys`.
+
+---
+
+## Email forensics
+
+Save the message as an `.eml` and name it. TACU reads what it says about itself and scores
+it in the open — and never executes, renders, visits or connects to anything in it.
+
+```sh
+ti auto is this email phishing suspicious.eml    # everything, scored, every reason listed
+ti auto trace the email in suspicious.eml        # Received chain as hops: IP, PTR, ASN, country
+ti auto did dkim pass for suspicious.eml         # SPF/DKIM/DMARC/ARC — and for whom
+ti auto is the attachment in suspicious.eml safe # typed by content, archives inventoried
+```
+
+```text
+EMAIL RISK SCORE: 100 / 100
+SEVERITY: HIGH
+
+Primary reasons
+──────────────────────────────────
+ +30  DMARC failed for acme-invoices.co
+ +20  SPF passed for attacker.example, not for the displayed acme-invoices.co
+ +15  display name names 'microsoft' but the address is at acme-invoices.co
+ +40  executable attachment: invoice.pdf
+ +25  invoice.pdf is Windows executable (PE)
+ +15  text says portal[.]microsoft[.]com, link goes to 203[.]0[.]113[.]9
+
+Authentication
+──────────────────────────────────
+SPF      PASS       for attacker.example
+DKIM     PASS       for attacker.example
+DMARC    FAIL       for acme-invoices.co
+
+Received chain (oldest first)
+──────────────────────────────────
+Hop  Source IP        PTR / relay                        ASN       Country
+1    203.0.113.7      mail.attacker.example              --        private
+2    67.231.152.10    continuity-service.proofpoint.com  AS22843   US
+3    --               Microsoft 365                      --        --
+```
+
+The finding that matters most is alignment: "SPF pass" is not reassurance until you know for
+whom. A spoof usually passes SPF and DKIM for the attacker's own domain while the From shows
+yours, and DMARC is what fails — so the authentication block says for whom each passed.
+
+The parser has no transport and cannot reach the network; the enricher receives only strings
+and cannot touch an attachment. Lookups are *about* what the mail names, never *to* it. Links
+are defanged; HTML is stripped, not rendered; attachments are hashed and typed in memory;
+archives are listed from their directory and never opened. Nothing is written to disk.
+
+---
+
 ## Everyday loop
 
 ### 1 · Find your way
@@ -394,6 +490,8 @@ ti config update --model qwen2.5-coder:1.5b --context-turns 2
 - **Workspace writes.** Create/edit/delete of source files stay inside the selected workspace. OS-critical paths (`/System`, `/usr`, `/etc`, …) cannot be mutated.
 - **Policy gate.** Deletes, secret-bearing argv, package/process/container changes, and outbound writes pause for review. `ti auto` will not invent `bash -c`.
 - **Web fetch.** SearXNG is loopback-only. Page reads are GET, no cookies, public addresses only.
+- **Email.** Static only: never executes, renders, visits or connects to anything in a message. Parser has no network path; enricher has no attachment access; links defanged in output.
+- **Recon.** The other outbound feature. GET-only, public addresses only, private and loopback targets refused, every contacted service listed in the answer. API keys are prompted, stored with mode 0600, and never placed on argv or in the audit log.
 - **Your data** lives under `~/.local/share/tacu/` (history, clipboard, artifacts). That directory is gitignored and is not part of this repository.
 
 See [SECURITY.md](SECURITY.md).

@@ -2,6 +2,114 @@
 
 All notable TACU changes are documented here. TACU follows [semantic versioning](https://semver.org/).
 
+## [0.7.0] - 2026-09-12
+
+### Added
+
+- `recon`, in SECURITY TOOLS: external reconnaissance of a domain or public
+  address. Subdomains from certificate transparency (crt.sh) and DNS, address
+  resolution with the CNAME chain and reverse DNS, the TLS certificate
+  presented (issuer, subject, SANs, validity, version, fingerprint), an HTTP
+  fingerprint, WAF/CDN detection, origin AS and prefix from Team Cymru over
+  DNS, geolocation from ipinfo.io, reputation from AbuseIPDB and VirusTotal
+  when keys are configured, and a risk score. Operations: `sweep`,
+  `subdomains`, `dns`, `tls`, `http`, `waf`, `asn`, `geo`, `reputation`.
+  Reached in words — "what is behind example.com", "is it behind cloudflare",
+  "who owns the ip", "is this ip malicious" — or with `ti tools run recon`.
+- WAF/CDN detection is scored across CNAME chain, response headers, cookie
+  names, ASN and certificate issuer. Each provider match lists the indicators
+  behind it and their weights: `Server: cloudflare` alone is 40%, five agreeing
+  indicators is 98%. Cloudflare, Akamai, AWS CloudFront and WAF, Azure Front
+  Door, Fastly, Imperva, F5, Sucuri, Google, GitHub, Netlify and Vercel.
+- The risk score shows its working. VirusTotal malicious +30, AbuseIPDB above
+  80 +30, recently allocated +10, suspicious AS owner +10, known CDN −10,
+  long-lived certificate −5. Every contribution is listed with its reason, and
+  every source that was not consulted is named — a score is only as complete
+  as what stands behind it, and it never collapses into "malicious" or "safe".
+- `ti config keys` stores AbuseIPDB and VirusTotal keys by prompt, never
+  echoed, saved with mode 0600, and never placed on a command line or in the
+  audit log. `TACU_ABUSEIPDB_KEY` and `TACU_VIRUSTOTAL_KEY` work for scripts.
+  Without a key the answer says "not checked" rather than guessing.
+- `ti help recon`, a section in `ti tools --help`, and a README section.
+- `email`, in SECURITY TOOLS: static forensics of a saved message. Headers and
+  their anomalies (Reply-To, Return-Path and Message-ID domains that differ
+  from From; display names carrying another address or a brand; Date drift and
+  missing timezone). The Received chain normalised into hops, oldest first,
+  with the source IP, PTR, ASN and country of each and the final receiver as
+  its own row. SPF, DKIM, DMARC and ARC as the receiver recorded them, and
+  *for whom*: a pass for the attacker's own domain while the From shows another
+  is named as such, because that is the shape most spoofs take. MX, SPF, DMARC
+  and DKIM-selector records and whois age for the sender domain. Every URL,
+  domain, address, IP and hash the message carries, defanged; links whose
+  visible text names a different host than their target; lookalike hosts
+  (substituted characters, near-edits, brand-as-token) against the sender and
+  a brand list; shorteners, bare-IP hosts, punycode, embedded credentials,
+  abuse-heavy TLDs. Attachments typed by their first bytes against both the
+  declared type and the extension, hashed in memory, double extensions caught,
+  archives inventoried from the central directory with encrypted entries,
+  executables, shortcuts, disk images, VBA projects and bomb-shaped ratios
+  flagged. Passive reputation for hop addresses and, with a key, VirusTotal for
+  domains and attachment hashes. Operations: `analyze`, `headers`, `auth`,
+  `hops`, `iocs`, `attachments`.
+- The email risk score lists every reason. DMARC fail +30, DKIM invalid +20,
+  SPF fail +15, Reply-To differs +15, display-name impersonation +15, new,
+  lookalike or unregistered sender domain +20, malicious URL +30, bad sender IP
+  +25, executable attachment +40, extension/content mismatch +25, suspicious
+  archive +20, authentication passed for another identity +20, link text lies
+  +15, link to a bare IP +10, no DMARC record +5. HIGH at 60, MEDIUM at 30.
+- Tab completion offers files and directories where a command expects one.
+  `ti juicy CH<Tab>` answered "no more arguments": zsh's `_arguments` treats
+  the first word as the command and the rest as its arguments, so it read
+  `juicy` as positional 1 and `CH` as an illegal positional 2. Every branch now
+  shifts past the subcommand before handing the line over, so `ti juicy CH`
+  completes `CHANGELOG.md`, `ti tools search TEXT ./not_req` completes
+  `./not_required/`, `ti tools map sr` completes `src/`, and an ambiguous
+  prefix lists its candidates. Positions that take words — a question, a search
+  pattern — still take words; the command and subcommand menus are unchanged.
+  bash gains directory completion for `map`, `find` and `search` and file
+  completion for `juicy`, which it never had.
+- `ti tools search` no longer fails with "Unterminated string" on a file that
+  contains a line-break character other than newline. ripgrep's JSON events
+  were split with `splitlines()`, which also breaks on NEL, form feed and
+  U+2028; a matched line holding one cut an event in two.
+- A read that names a file resolves against the directory the user is standing
+  in when that directory is inside a remembered workspace. "is this email
+  phishing suspicious.eml" from inside one was answered "not a readable file"
+  because the configured workspace, elsewhere, was searched instead.
+
+### Security
+
+- `email` never executes, renders, browses or detonates anything. The parser
+  takes bytes and has no transport, so it cannot reach the network; the
+  enricher takes strings — domains, addresses, hashes — and never the message
+  or an attachment, so it cannot touch one. Both are held by tests on the
+  functions' shapes. Nothing the message names is ever contacted: lookups are
+  *about* its addresses and domains, from third parties, and a request to any
+  URL or host it contains is refused by the same test. HTML is stripped to
+  text. Attachments are hashed and typed in memory, archives are listed from
+  their directory and never extracted, and nothing is written to disk. Links
+  are defanged everywhere they appear in output.
+- A domain age from whois is trusted only when the answer names the domain and
+  the date follows that line. The TLD's IANA stub, returned for every lookup,
+  made an unregistered domain look thirty years old; an unregistered sender
+  domain is now reported as exactly that, and scored.
+
+- `recon` is TACU's second outbound feature after `ti web`, and is declared as
+  one: a `network:outbound` permission on the contract, and every answer ends
+  with the services that were contacted. Requests are GET-only with DNS-to-
+  socket pinning; a target that is, or resolves to, a private, loopback or
+  link-local address is refused before any request is made, and a subdomain
+  that does so is reported and never probed.
+- The `ti ask` lookup surface refuses outbound tools at build time, alongside
+  the existing refusal of tools that write. A model answering a question about
+  a file must not be able to turn it into requests to a dozen services nobody
+  asked for; recon is reached through the planner, where the user named the
+  target.
+- Cookie values from probed hosts are never recorded: the name is the
+  indicator, the value is a session token.
+- Discovery is passive. The optional `bruteforce` pass tries a short built-in
+  list of common names by DNS only, and only when asked.
+
 ## [0.6.1] - 2026-09-09
 
 ### Fixed

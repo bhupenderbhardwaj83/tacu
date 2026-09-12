@@ -2746,6 +2746,18 @@ def _intent_text(words: list[str]) -> str:
     return intent
 
 
+def _names_a_file_here(intent: str) -> bool:
+    """Does the intent name a file that exists relative to where the user stands?"""
+
+    from .routing import _filenames_from_intent
+
+    for name in _filenames_from_intent(intent):
+        candidate = Path(name)
+        if not candidate.is_absolute() and (Path.cwd() / candidate).is_file():
+            return True
+    return False
+
+
 def _intent_workspace(value: Path | None) -> Path:
     workspace = (value or configured_workspace() or Path.cwd()).expanduser().resolve()
     if not workspace.is_dir():
@@ -3754,6 +3766,19 @@ def handle_intent_command(arguments: argparse.Namespace, client: ModelProvider) 
         # where the user is standing, not somewhere they have forgotten about.
         arguments.workspace = resolve_working_workspace(
             arguments.workspace, verb=arguments.subcommand or "auto")
+    elif arguments.workspace is None and _names_a_file_here(intent):
+        # A read of a file the user named is a read of the file in front of
+        # them. "is this email phishing suspicious.eml" from inside a remembered
+        # workspace was answered "not a readable file" because the configured
+        # workspace, elsewhere, was searched instead.
+        from . import workspaces
+
+        here = Path.cwd().resolve()
+        if workspaces.containing(here) is not None:
+            # The named path is relative to here, so here is the jail — a
+            # narrower one than the workspace that contains it, never wider.
+            arguments.workspace = here
+            workspace = here
     piped = _piped_evidence(arguments)
     if piped is not None and _pipe_is_the_subject(intent):
         # The data was handed in; read it rather than going to look for other data.
@@ -4423,6 +4448,10 @@ def parser() -> argparse.ArgumentParser:
         help=f"prior conversation turns sent to the model (0-{MAX_CONTEXT_TURNS}; default {DEFAULT_CONTEXT_TURNS})",
     )
     config_sub.add_parser("reset", help="reset model and context settings; keep the workspace")
+    keys_parser = config_sub.add_parser(
+        "keys", help="store API keys for recon reputation sources (prompted, never on the command line)")
+    keys_parser.add_argument("--clear", action="store_true", help="remove stored recon keys")
+    keys_parser.add_argument("--show", action="store_true", help="show which keys are set, never their values")
     command_parser("plugins", "list providers, middleware plugins, and built-in tool profiles", "ticu plugins")
     doctor_parser = command_parser("doctor", "check whether this computer is ready for TACU", "ticu doctor", aliases=["health"])
     doctor_parser.add_argument("--json", action="store_true"); doctor_parser.add_argument("--workspace", type=Path)
@@ -4943,6 +4972,8 @@ def handle_config_command(arguments: argparse.Namespace, client: ModelProvider) 
         print("Model and context preferences reset. Workspace and 100-turn history were kept.")
         _print_config(effective)
         return 0
+    if action == "keys":
+        return _handle_recon_keys(arguments)
     if action is None:
         return _guided_config_update(client, active)
 
@@ -4964,6 +4995,54 @@ def handle_config_command(arguments: argparse.Namespace, client: ModelProvider) 
     _print_config(effective)
     if requested_model and os.environ.get("TACU_MODEL") and os.environ["TACU_MODEL"] != requested_model:
         print(f"TACU_MODEL={os.environ['TACU_MODEL']} currently overrides the saved model.")
+    return 0
+
+
+_RECON_KEYS = (("abuseipdb_key", "AbuseIPDB", "https://www.abuseipdb.com/account/api"),
+               ("virustotal_key", "VirusTotal", "https://www.virustotal.com/gui/my-apikey"))
+
+
+def _handle_recon_keys(arguments: argparse.Namespace) -> int:
+    """Store reputation API keys by prompt, so they never touch argv, history or the audit log."""
+
+    import getpass
+
+    from .configuration import load_config, save_config
+
+    config = load_config()
+    stored = config.get("recon") if isinstance(config.get("recon"), dict) else {}
+    if getattr(arguments, "clear", False):
+        config.pop("recon", None)
+        save_config(config)
+        print("Recon keys removed.")
+        return 0
+    if getattr(arguments, "show", False) or not sys.stdin.isatty():
+        for key, label, _url in _RECON_KEYS:
+            env = {"abuseipdb_key": "TACU_ABUSEIPDB_KEY", "virustotal_key": "TACU_VIRUSTOTAL_KEY"}[key]
+            source = ("environment" if os.environ.get(env) else "config" if stored.get(key) else "not set")
+            print(f"  {label:11} {source}")
+        if not sys.stdin.isatty() and not getattr(arguments, "show", False):
+            print("Run ti config keys in a terminal to enter them; values are prompted and never echoed.")
+        return 0
+    print("Reputation keys for recon. Paste each and press Enter; leave blank to keep what is stored.")
+    print("Stored in config.json with mode 0600. They are never written to argv, history or the audit log.")
+    changed = False
+    for key, label, url in _RECON_KEYS:
+        current = "set" if stored.get(key) else "not set"
+        try:
+            value = getpass.getpass(f"  {label} key ({current}; get one at {url}): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if value:
+            stored[key] = value
+            changed = True
+    if changed:
+        config["recon"] = stored
+        save_config(config)
+        print("Saved. Check with: ti config keys --show")
+    else:
+        print("Nothing changed.")
     return 0
 
 
